@@ -1,27 +1,21 @@
 package io.github.kurumi33.eropic.ui.gallery
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -31,6 +25,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -42,20 +37,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
-import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.index.IndexPhase
-import io.github.kurumi33.eropic.core.index.IndexState
-import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
+import io.github.kurumi33.eropic.ui.components.MediaGrid
+import io.github.kurumi33.eropic.ui.components.SelectionTopBar
+import io.github.kurumi33.eropic.ui.components.shareImages
 import io.github.kurumi33.eropic.ui.permission.MediaAccess
 import kotlinx.coroutines.launch
 
@@ -67,69 +60,97 @@ fun GalleryScreen(
     onRequestFullAccess: () -> Unit,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val count by viewModel.count.collectAsStateWithLifecycle()
     val totalSize by viewModel.totalSize.collectAsStateWithLifecycle()
-    val indexState by viewModel.indexState.collectAsStateWithLifecycle()
-    val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
     val favoritesOnly by viewModel.favoritesOnly.collectAsStateWithLifecycle()
+    val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
+
     val items = viewModel.media.collectAsLazyPagingItems()
-    val scope = rememberCoroutineScope()
+
+    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val selectionActive = selectedIds.isNotEmpty()
     var sortMenuOpen by remember { mutableStateOf(false) }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = {
-                Column {
-                    Text(text = "图库")
-                    if (settings.showMeta) {
-                        Text(
-                            text = formatCount(count) + " 张 · " + formatBytes(totalSize),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+    Column(Modifier.fillMaxSize()) {
+        if (selectionActive) {
+            SelectionTopBar(
+                selectedCount = selectedIds.size,
+                onClose = { selectedIds = emptySet() },
+                onSelectAll = {
+                    scope.launch { selectedIds = viewModel.viewerIds().toSet() }
+                },
+                onFavorite = {
+                    val ids = selectedIds
+                    scope.launch {
+                        viewModel.setFavorites(ids, true)
+                        selectedIds = emptySet()
                     }
-                }
-            },
-            actions = {
-                IconButton(onClick = { viewModel.setShowMeta(!settings.showMeta) }) {
-                    Icon(
-                        imageVector = if (settings.showMeta) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                        contentDescription = if (settings.showMeta) "隐藏文件数与大小" else "显示文件数与大小",
-                    )
-                }
-                Box {
-                    IconButton(onClick = { sortMenuOpen = true }) {
-                        Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = "排序方式")
+                },
+                onUnfavorite = {
+                    val ids = selectedIds
+                    scope.launch {
+                        viewModel.setFavorites(ids, false)
+                        selectedIds = emptySet()
                     }
-                    DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
-                        SortOrder.entries.forEach { order ->
-                            DropdownMenuItem(
-                                text = { Text(order.label) },
-                                onClick = {
-                                    viewModel.setSortOrder(order)
-                                    sortMenuOpen = false
-                                },
-                                trailingIcon = {
-                                    if (sortOrder == order) {
-                                        Icon(imageVector = Icons.Filled.Check, contentDescription = null)
-                                    }
-                                },
+                },
+                onShare = { shareImages(context, selectedIds) },
+            )
+        } else {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("图库")
+                        if (settings.showMeta) {
+                            Text(
+                                text = formatCount(count) + " 张 · " + formatBytes(totalSize),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
-                }
-            },
-        )
-
-        if (!access.full) {
-            PartialAccessBanner(onRequestFullAccess)
+                },
+                actions = {
+                    IconButton(onClick = { viewModel.setShowMeta(!settings.showMeta) }) {
+                        Icon(
+                            imageVector = if (settings.showMeta) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                            contentDescription = if (settings.showMeta) "隐藏张数与大小" else "显示张数与大小",
+                        )
+                    }
+                    Box {
+                        IconButton(onClick = { sortMenuOpen = true }) {
+                            Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = "排序")
+                        }
+                        DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                            SortOrder.entries.forEach { order ->
+                                DropdownMenuItem(
+                                    text = { Text(order.label) },
+                                    trailingIcon = {
+                                        if (order == sortOrder) {
+                                            Icon(imageVector = Icons.Filled.Check, contentDescription = null)
+                                        }
+                                    },
+                                    onClick = {
+                                        viewModel.setSortOrder(order)
+                                        sortMenuOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                },
+            )
         }
 
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
             FilterChip(
                 selected = !favoritesOnly,
@@ -140,197 +161,166 @@ fun GalleryScreen(
                 selected = favoritesOnly,
                 onClick = { if (!favoritesOnly) viewModel.toggleFavoritesFilter() },
                 label = { Text("收藏") },
-                leadingIcon = {
-                    Icon(imageVector = Icons.Filled.Favorite, contentDescription = null)
-                },
             )
         }
 
-        IndexBanner(indexState = indexState, onStart = viewModel::startIndex)
+        if (!access.full) {
+            PartialAccessBanner(onRequestFullAccess = onRequestFullAccess)
+        }
+
+        IndexBanner(indexState = indexState, onRetry = viewModel::startIndex)
 
         when {
-            indexState.phase == IndexPhase.SYNCING && count == 0L -> {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            indexState.phase == IndexPhase.SYNCING && items.itemCount == 0 -> {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
-                        Text(
-                            text = "正在读取系统相册索引…",
-                            modifier = Modifier.padding(top = 12.dp),
-                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在读取系统相册索引…", style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             }
 
             items.itemCount == 0 -> {
                 EmptyGallery(
-                    indexState = indexState,
+                    phase = indexState.phase,
                     favoritesOnly = favoritesOnly,
                     onStart = viewModel::startIndex,
                 )
             }
 
             else -> {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(settings.gridColumns),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    items(count = items.itemCount) { index ->
-                        val item = items[index]
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(1f)
-                                .clickable(enabled = item != null) {
-                                    val clicked = item ?: return@clickable
-                                    scope.launch {
-                                        // 查看器需要完整的顺序 id 列表（与当前排序/筛选一致），
-                                        // 十万级只取 id 约 800KB，实测几十毫秒。
-                                        val ids = viewModel.viewerIds()
-                                        if (ids.isNotEmpty()) {
-                                            val start = ids.indexOf(clicked.id).coerceAtLeast(0)
-                                            onOpenViewer(ids, start)
-                                        }
-                                    }
-                                },
-                        ) {
-                            if (item != null) {
-                                AsyncImage(
-                                    model = MediaUris.of(item.id),
-                                    contentDescription = item.displayName,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                                if (item.localFavorite || item.isFavorite) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Favorite,
-                                        contentDescription = "已收藏",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .padding(3.dp)
-                                            .fillMaxSize(0.18f),
-                                    )
-                                }
+                MediaGrid(
+                    items = items,
+                    columns = settings.gridColumns,
+                    thumbnailsEnabled = settings.thumbnailCacheEnabled,
+                    selectedIds = selectedIds,
+                    selectionActive = selectionActive,
+                    thumbnailProvider = { item -> viewModel.thumbnailFile(item) },
+                    onClick = { item ->
+                        if (selectionActive) {
+                            selectedIds = if (item.id in selectedIds) {
+                                selectedIds - item.id
+                            } else {
+                                selectedIds + item.id
+                            }
+                        } else {
+                            scope.launch {
+                                val ids = viewModel.viewerIds()
+                                onOpenViewer(ids, ids.indexOf(item.id).coerceAtLeast(0))
                             }
                         }
-                    }
-                }
-                if (items.loadState.refresh is LoadState.Loading) {
-                    Text(
-                        text = "加载中…",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(8.dp),
-                    )
-                }
+                    },
+                    onLongClick = { item -> selectedIds = selectedIds + item.id },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun PartialAccessBanner(onRequestFull: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-        ),
+private fun PartialAccessBanner(onRequestFullAccess: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        shape = MaterialTheme.shapes.medium,
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                text = "当前只授权了部分照片",
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Text(
-                text = "这样图库会漏图。请允许访问所有照片。",
+                text = "目前只授权了部分照片，图库可能看不到全部。",
                 style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = onRequestFull) { Text("允许访问所有照片") }
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = onRequestFullAccess) { Text("允许全部") }
         }
     }
 }
 
 @Composable
-private fun IndexBanner(indexState: IndexState, onStart: () -> Unit) {
-    when {
-        indexState.isRunning -> {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    progress = {
-                        val total = indexState.signatureTotal
-                        if (indexState.phase == IndexPhase.HASHING && total > 0) {
-                            (indexState.signatureDone.toFloat() / total).coerceIn(0f, 1f)
-                        } else {
-                            0f
-                        }
-                    },
-                )
+private fun IndexBanner(
+    indexState: io.github.kurumi33.eropic.core.index.IndexState,
+    onRetry: () -> Unit,
+) {
+    when (indexState.phase) {
+        IndexPhase.HASHING, IndexPhase.DEDUPING -> {
+            val total = indexState.signatureTotal.coerceAtLeast(1)
+            val progress = indexState.signatureDone.toFloat() / total
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+            ) {
                 Text(
-                    text = buildString {
-                        append(indexState.message)
-                        if (indexState.phase == IndexPhase.HASHING && indexState.signatureTotal > 0) {
-                            append(" ")
-                            append(indexState.signatureDone)
-                            append("/")
-                            append(indexState.signatureTotal)
-                        }
-                    },
+                    text = "正在计算指纹 " + indexState.signatureDone + " / " + indexState.signatureTotal,
                     style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(top = 4.dp),
+                )
+                LinearProgressIndicator(
+                    progress = { progress.coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
                 )
             }
         }
 
-        indexState.phase == IndexPhase.ERROR -> {
+        IndexPhase.ERROR -> {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = indexState.message,
+                    text = "索引出错：" + (indexState.message ?: ""),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = onStart) { Text("重试") }
+                TextButton(onClick = onRetry) { Text("重试") }
             }
         }
+
+        else -> Unit
     }
 }
 
 @Composable
-private fun EmptyGallery(indexState: IndexState, favoritesOnly: Boolean, onStart: () -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        if (favoritesOnly) {
-            Text(text = "还没有收藏的图片", style = MaterialTheme.typography.titleLarge)
+private fun EmptyGallery(
+    phase: IndexPhase,
+    favoritesOnly: Boolean,
+    onStart: () -> Unit,
+) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = "在图片查看器里点爱心即可收藏。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(vertical = 12.dp),
+                text = when {
+                    favoritesOnly -> "还没有收藏的图片"
+                    phase == IndexPhase.HASHING -> "正在建立索引…"
+                    else -> "还没有照片索引"
+                },
+                style = MaterialTheme.typography.titleMedium,
             )
-            return
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = when {
+                    favoritesOnly -> "在网格里长按或点开大图后即可收藏。"
+                    phase == IndexPhase.HASHING -> "首次索引需要几分钟，可以先去逛逛其他页面。"
+                    else -> "Eropic 只读取系统相册索引，不会改动你的任何文件。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!favoritesOnly && phase != IndexPhase.HASHING) {
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onStart) { Text("开始建立索引") }
+            }
         }
-        Text(text = "还没有建立索引", style = MaterialTheme.typography.titleLarge)
-        Text(
-            text = if (indexState.phase == IndexPhase.DONE) {
-                "没有找到可显示的照片：请确认相册权限，或重新建立索引。"
-            } else {
-                "Eropic 会读取系统相册数据库，把照片索引到本地。首次索引十万张照片通常需要几分钟。"
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(vertical = 12.dp),
-        )
-        Button(onClick = onStart) { Text("开始建立索引") }
     }
 }

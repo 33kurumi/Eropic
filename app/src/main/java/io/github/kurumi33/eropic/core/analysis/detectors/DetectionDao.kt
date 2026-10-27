@@ -1,0 +1,74 @@
+package io.github.kurumi33.eropic.core.analysis.detectors
+
+import androidx.room.Dao
+import androidx.room.Query
+import androidx.room.RawQuery
+import androidx.sqlite.db.SupportSQLiteQuery
+import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+
+/**
+ * 清理检测器的只读查询入口。
+ *
+ * 刻意不提供任何 update / delete 方法：M2 阶段的检测结果只是"建议"，
+ * 真正的删除/移动要走 M4 的回收站与操作日志链路，检测层越权写库会绕开撤销能力。
+ * 所有查询都带 isPresent = 1，已消失（被用户在系统相册删掉）的条目不应出现在清理建议里。
+ */
+@Dao
+interface DetectionDao {
+
+    /** Top N 大文件；排序里补 id 是为了同体积时结果稳定，避免两次查询顺序抖动。 */
+    @Query(
+        "SELECT * FROM media_item WHERE isPresent = 1 AND sizeBytes >= :minSizeBytes " +
+            "ORDER BY sizeBytes DESC, id ASC LIMIT :limit",
+    )
+    suspend fun largeFiles(minSizeBytes: Long, limit: Int): List<MediaEntity>
+
+    /**
+     * 大文件的命中总数与总字节。
+     *
+     * 不能用 Top N 列表自己累加：列表被 LIMIT 截断过，UI 显示的"可释放"会偏小。
+     */
+    @Query(
+        "SELECT COUNT(*) AS hits, COALESCE(SUM(sizeBytes), 0) AS bytes FROM media_item " +
+            "WHERE isPresent = 1 AND sizeBytes >= :minSizeBytes",
+    )
+    suspend fun largeFileSummary(minSizeBytes: Long): LargeFileSummaryRow
+
+    /**
+     * 久远照片：拍摄时间早于 [beforeMs]，且系统收藏与 App 内收藏都为假。
+     *
+     * dateTakenMs 在扫描层已经做过回退（DATE_TAKEN 无效时取 DATE_MODIFIED，见 MediaStoreDataSource），
+     * 理论上不会为 0；这里仍然保留 > 0 的判断，防御历史数据与迁移残留的空值行，
+     * 否则它们会被当成"1970 年的老照片"排在最前面。
+     */
+    @Query(
+        "SELECT * FROM media_item WHERE isPresent = 1 AND dateTakenMs > 0 " +
+            "AND dateTakenMs < :beforeMs AND isFavorite = 0 AND localFavorite = 0 " +
+            "ORDER BY dateTakenMs ASC, id ASC LIMIT :limit",
+    )
+    suspend fun oldPhotos(beforeMs: Long, limit: Int): List<MediaEntity>
+
+    /**
+     * 截图候选（粗筛）：SQL 只保证不漏，精确判定交给 [ScreenshotDetector.looksLikeScreenshot]。
+     */
+    @RawQuery(observedEntities = [MediaEntity::class])
+    suspend fun screenshotCandidates(query: SupportSQLiteQuery): List<MediaEntity>
+
+    /**
+     * 模糊图：只取已计算过签名的行（signatureVersion > 0），未算的不能当成清晰。
+     *
+     * signatureVersion = -1 表示解码失败、blurScore 恒为 null，条件里的 IS NOT NULL 顺带排除它。
+     */
+    @Query(
+        "SELECT * FROM media_item WHERE isPresent = 1 AND signatureVersion > 0 " +
+            "AND blurScore IS NOT NULL AND blurScore < :threshold " +
+            "ORDER BY blurScore ASC, id ASC LIMIT :limit",
+    )
+    suspend fun blurryImages(threshold: Double, limit: Int): List<MediaEntity>
+}
+
+/** [DetectionDao.largeFileSummary] 的聚合行；字段名必须和 SQL 里的别名一致，Room 靠列名映射。 */
+data class LargeFileSummaryRow(
+    val hits: Long,
+    val bytes: Long,
+)

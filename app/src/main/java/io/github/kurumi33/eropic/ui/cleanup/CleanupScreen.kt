@@ -7,17 +7,24 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -27,11 +34,17 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
@@ -43,15 +56,148 @@ import io.github.kurumi33.eropic.core.index.IndexState
 import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
+import io.github.kurumi33.eropic.ui.common.formatCount
+import io.github.kurumi33.eropic.ui.common.formatMediaSubtitle
+import java.io.File
+
+/** 清理页的六个入口。前两个来自查重分组，后四个来自检测器。 */
+enum class CleanupCategory(val label: String) {
+    DUPLICATES("重复"),
+    SIMILAR("相似"),
+    LARGE("大文件"),
+    OLD("久远"),
+    SCREENSHOT("截图"),
+    BLURRY("模糊"),
+}
+
+/** 当前分类要展示的内容。 */
+private sealed interface CleanupContent {
+    data object Loading : CleanupContent
+    data class Grouped(val groups: List<DuplicateGroupEntity>) : CleanupContent
+    data class Detected(val items: List<MediaEntity>, val summary: String) : CleanupContent
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CleanupScreen(viewModel: EropicViewModel) {
+fun CleanupScreen(
+    viewModel: EropicViewModel,
+    onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
+) {
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
 
+    var category by rememberSaveable { mutableStateOf(CleanupCategory.DUPLICATES) }
+    var filterState by remember { mutableStateOf(FilterUiState()) }
+    var showFilter by rememberSaveable { mutableStateOf(false) }
+    // 非空表示筛选结果页正在最上层。
+    var filteredState by remember { mutableStateOf<FilterUiState?>(null) }
+    var compareGroupId by rememberSaveable { mutableStateOf(-1L) }
+    var refreshToken by remember { mutableIntStateOf(0) }
+
+    filteredState?.let { applied ->
+        FilteredScreen(
+            viewModel = viewModel,
+            filterState = applied,
+            onBack = { filteredState = null },
+            onOpenViewer = onOpenViewer,
+        )
+        return
+    }
+    if (compareGroupId > 0L) {
+        CompareScreen(
+            viewModel = viewModel,
+            groupId = compareGroupId,
+            onClose = { compareGroupId = -1L },
+            onOpenViewer = onOpenViewer,
+        )
+        return
+    }
+    if (showFilter) {
+        FilterSheet(
+            initial = filterState,
+            onDismiss = { showFilter = false },
+            onApply = {
+                filterState = it
+                showFilter = false
+                if (!it.isEmpty) filteredState = it
+            },
+        )
+    }
+
+    val content by produceState<CleanupContent>(
+        initialValue = CleanupContent.Loading,
+        category,
+        refreshToken,
+        groups,
+    ) {
+        value = CleanupContent.Loading
+        value = runCatching {
+            when (category) {
+                CleanupCategory.DUPLICATES -> CleanupContent.Grouped(
+                    groups.filter { it.kind == DuplicateScanner.KIND_EXACT },
+                )
+
+                CleanupCategory.SIMILAR -> CleanupContent.Grouped(
+                    groups.filter { it.kind == DuplicateScanner.KIND_NEAR },
+                )
+
+                CleanupCategory.LARGE -> {
+                    val result = viewModel.largeFiles()
+                    CleanupContent.Detected(
+                        items = result.items,
+                        summary = "共 ${formatCount(result.hitCount)} 张 ≥ 5 MB，合计 ${formatBytes(result.reclaimableBytes)}",
+                    )
+                }
+
+                CleanupCategory.OLD -> CleanupContent.Detected(
+                    items = viewModel.oldPhotos(),
+                    summary = "拍摄时间超过 3 年、且未收藏的图片（按时间从旧到新）",
+                )
+
+                CleanupCategory.SCREENSHOT -> CleanupContent.Detected(
+                    items = viewModel.screenshots(),
+                    summary = "疑似截图，最多列出 2000 张候选：命中截图目录、屏幕分辨率或图标/文字特征",
+                )
+
+                CleanupCategory.BLURRY -> CleanupContent.Detected(
+                    items = viewModel.blurred(),
+                    summary = "清晰度低于阈值（Laplacian 方差 < 100，已完成指纹计算）",
+                )
+            }
+        }.getOrElse { error ->
+            CleanupContent.Detected(
+                items = emptyList(),
+                summary = "读取失败：${error.message ?: error::class.simpleName}",
+            )
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(title = { Text("清理") })
+        TopAppBar(
+            title = { Text("清理") },
+            actions = {
+                TextButton(onClick = { showFilter = true }) {
+                    Text(if (filterState.isEmpty) "组合筛选" else "筛选 · 已设置")
+                }
+                IconButton(onClick = { showFilter = true }) {
+                    Icon(imageVector = Icons.Filled.Tune, contentDescription = "组合筛选")
+                }
+            },
+        )
+
+        LazyRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(CleanupCategory.entries.toList(), key = { it.name }) { item ->
+                FilterChip(
+                    selected = category == item,
+                    onClick = { category = item },
+                    label = { Text(item.label) },
+                )
+            }
+        }
+
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(12.dp),
@@ -59,26 +205,90 @@ fun CleanupScreen(viewModel: EropicViewModel) {
         ) {
             item { IndexCard(indexState, onStart = viewModel::startIndex, onCancel = viewModel::cancelIndex) }
             item { ReadOnlyNotice() }
-            if (groups.isEmpty()) {
-                item {
-                    Text(
-                        text = if (indexState.phase == IndexPhase.DONE) {
-                            "没有发现重复或相似图片。"
-                        } else {
-                            "索引完成后，这里会按「可释放空间」从大到小列出重复/相似分组。"
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(8.dp),
-                    )
+
+            when (val current = content) {
+                CleanupContent.Loading -> item {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(80.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { CircularProgressIndicator() }
                 }
-            } else {
-                items(groups, key = { it.groupId }) { group ->
-                    GroupCard(group = group, loadMembers = viewModel::members)
+
+                is CleanupContent.Grouped -> {
+                    item {
+                        ContentHeader(
+                            summary = when (category) {
+                                CleanupCategory.DUPLICATES ->
+                                    if (current.groups.isEmpty()) "还没有精确重复分组。" else
+                                        "精确重复：文件内容（SHA-256）完全一致的图片，默认按可释放空间排序。"
+
+                                else ->
+                                    if (current.groups.isEmpty()) "还没有相似图片分组。" else
+                                        "相似图片：dHash 与 pHash 双重距离阈值内的图片，不一定真的相同，需逐组确认。"
+                            },
+                            onRefresh = { refreshToken++ },
+                        )
+                    }
+                    if (current.groups.isEmpty()) {
+                        item { EmptyHint() }
+                    } else {
+                        items(current.groups, key = { it.groupId }) { group ->
+                            GroupCard(
+                                group = group,
+                                loadMembers = viewModel::members,
+                                loadThumbnail = viewModel::thumbnailFile,
+                                onCompare = { compareGroupId = group.groupId },
+                            )
+                        }
+                    }
+                }
+
+                is CleanupContent.Detected -> {
+                    item {
+                        ContentHeader(
+                            summary = current.summary,
+                            onRefresh = { refreshToken++ },
+                        )
+                    }
+                    if (current.items.isEmpty()) {
+                        item { EmptyHint() }
+                    } else {
+                        val ids = current.items.map { it.id }
+                        itemsIndexed(current.items, key = { _, item -> item.id }) { index, item ->
+                            MediaListRow(
+                                media = item,
+                                loadThumbnail = viewModel::thumbnailFile,
+                                onClick = { onOpenViewer(ids, index) },
+                            )
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun ContentHeader(summary: String, onRefresh: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = summary,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onRefresh) { Text("刷新") }
+    }
+}
+
+@Composable
+private fun EmptyHint() {
+    Text(
+        text = "没有符合条件的图片。索引完成后重新刷新再看看。",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(8.dp),
+    )
 }
 
 @Composable
@@ -110,7 +320,9 @@ private fun IndexCard(indexState: IndexState, onStart: () -> Unit, onCancel: () 
                 )
                 OutlinedButton(onClick = onCancel) { Text("取消") }
             } else {
-                Button(onClick = onStart) { Text(if (indexState.phase == IndexPhase.DONE) "重新扫描" else "开始扫描") }
+                Button(onClick = onStart) {
+                    Text(if (indexState.phase == IndexPhase.DONE) "重新扫描" else "开始扫描")
+                }
             }
         }
     }
@@ -124,10 +336,10 @@ private fun ReadOnlyNotice() {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(text = "M0 只读", style = MaterialTheme.typography.titleSmall)
+            Text(text = "只读检索", style = MaterialTheme.typography.titleSmall)
             Text(
-                text = "Eropic 只负责找出候选，不会自动删除或移动任何文件。" +
-                    "删除、移动、回收站会在后续里程碑里，由你逐组确认后执行。",
+                text = "Eropic 只负责找候选，不会自动删除或移动任何文件。" +
+                    "删除、真实移动、回收站会在 M3 里由你逐组确认后执行。",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -135,7 +347,12 @@ private fun ReadOnlyNotice() {
 }
 
 @Composable
-private fun GroupCard(group: DuplicateGroupEntity, loadMembers: suspend (Long) -> List<MediaEntity>) {
+private fun GroupCard(
+    group: DuplicateGroupEntity,
+    loadMembers: suspend (Long) -> List<MediaEntity>,
+    loadThumbnail: suspend (MediaEntity) -> File?,
+    onCompare: () -> Unit,
+) {
     val members by produceState(initialValue = emptyList<MediaEntity>(), group.groupId) {
         value = loadMembers(group.groupId)
     }
@@ -163,25 +380,81 @@ private fun GroupCard(group: DuplicateGroupEntity, loadMembers: suspend (Long) -
             }
             LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(members, key = { it.id }) { media ->
-                    Box(
-                        modifier = Modifier
-                            .size(76.dp)
-                            .clip(RoundedCornerShape(8.dp)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        AsyncImage(
-                            model = MediaUris.of(media.id),
-                            contentDescription = media.displayName,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+                    GroupThumb(media = media, loadThumbnail = loadThumbnail)
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = {}, enabled = false) { Text("对比预览（M2）") }
-                TextButton(onClick = {}, enabled = false) { Text("选择保留（M2）") }
+                TextButton(onClick = onCompare, enabled = members.size >= 2) { Text("对比预览") }
+                TextButton(onClick = {}, enabled = false) { Text("选择保留（M3）") }
             }
+        }
+    }
+}
+
+@Composable
+private fun GroupThumb(media: MediaEntity, loadThumbnail: suspend (MediaEntity) -> File?) {
+    val thumb by produceState<File?>(initialValue = null, media.id, media.sizeBytes) {
+        value = loadThumbnail(media)
+    }
+    Box(
+        modifier = Modifier
+            .size(76.dp)
+            .clip(RoundedCornerShape(8.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        AsyncImage(
+            model = thumb?.let { android.net.Uri.fromFile(it) } ?: MediaUris.of(media.id),
+            contentDescription = media.displayName,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+@Composable
+private fun MediaListRow(
+    media: MediaEntity,
+    loadThumbnail: suspend (MediaEntity) -> File?,
+    onClick: () -> Unit,
+) {
+    val thumb by produceState<File?>(initialValue = null, media.id, media.sizeBytes) {
+        value = loadThumbnail(media)
+    }
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AsyncImage(
+                model = thumb?.let { android.net.Uri.fromFile(it) } ?: MediaUris.of(media.id),
+                contentDescription = media.displayName,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(8.dp)),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = media.displayName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = formatMediaSubtitle(
+                        sizeBytes = media.sizeBytes,
+                        width = media.width,
+                        height = media.height,
+                        dateTakenMs = media.dateTakenMs,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Box(modifier = Modifier.width(4.dp))
         }
     }
 }

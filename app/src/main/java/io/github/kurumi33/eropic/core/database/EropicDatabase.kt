@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import io.github.kurumi33.eropic.core.analysis.detectors.DetectionDao
 import io.github.kurumi33.eropic.core.database.dao.DuplicateDao
 import io.github.kurumi33.eropic.core.database.dao.HashBandDao
 import io.github.kurumi33.eropic.core.database.dao.MediaDao
@@ -29,6 +30,7 @@ abstract class EropicDatabase : RoomDatabase() {
     abstract fun mediaDao(): MediaDao
     abstract fun hashBandDao(): HashBandDao
     abstract fun duplicateDao(): DuplicateDao
+    abstract fun detectionDao(): DetectionDao
 
     companion object {
         /**

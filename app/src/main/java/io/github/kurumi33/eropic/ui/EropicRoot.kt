@@ -128,7 +128,10 @@ fun EropicRoot(viewModel: EropicViewModel) {
                     viewModel = viewModel,
                     onOpenViewer = viewModel::openViewer,
                 )
-                2 -> CleanupScreen(viewModel)
+                2 -> CleanupScreen(
+                    viewModel = viewModel,
+                    onOpenViewer = viewModel::openViewer,
+                )
                 else -> SettingsScreen(viewModel)
             }
         }

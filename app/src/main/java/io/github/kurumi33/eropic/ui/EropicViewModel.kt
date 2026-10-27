@@ -12,7 +12,9 @@ import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.index.IndexState
 import io.github.kurumi33.eropic.core.media.SortOrder
+import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileResult
 import io.github.kurumi33.eropic.core.model.FolderRow
+import io.github.kurumi33.eropic.core.query.MediaFilter
 import io.github.kurumi33.eropic.core.settings.AppSettings
 import io.github.kurumi33.eropic.core.settings.ThemeMode
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -25,6 +27,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 
 /** 大图查看器目标：有序 id 列表 + 起始位置。放在 ViewModel 里以便旋转屏幕后不丢。 */
 data class ViewerTarget(val ids: List<Long>, val startIndex: Int)
@@ -145,6 +148,59 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
             container.indexCoordinator.start()
         }
     }
+
+    // ---- M2 检索与检测 ----
+
+    suspend fun largeFiles(): LargeFileResult = container.largeFileDetector.find()
+
+    suspend fun oldPhotos(nowMs: Long = System.currentTimeMillis()): List<MediaEntity> =
+        container.oldPhotoDetector.find(nowMs)
+
+    suspend fun screenshots(): List<MediaEntity> = container.screenshotDetector.find()
+
+    suspend fun blurred(): List<MediaEntity> = container.blurDetector.find()
+
+    fun filteredMedia(filter: MediaFilter): Flow<PagingData<MediaEntity>> =
+        repository.pagingData(filter, sortOrder.value)
+
+    suspend fun filteredIds(filter: MediaFilter): List<Long> = repository.ids(filter, sortOrder.value)
+
+    // ---- 缩略图缓存 ----
+
+    /** 网格单元格用的缩略图：命中缓存直接给文件，未命中则按需生成并落盘。 */
+    suspend fun thumbnailFile(item: MediaEntity): File? = container.thumbnailCache.get(item)
+
+    private val _thumbnailCacheSize = MutableStateFlow(0L)
+    val thumbnailCacheSize: StateFlow<Long> = _thumbnailCacheSize
+
+    fun refreshThumbnailCacheSize() {
+        viewModelScope.launch { _thumbnailCacheSize.value = container.thumbnailCache.sizeBytes() }
+    }
+
+    fun clearThumbnailCache() {
+        viewModelScope.launch {
+            container.thumbnailCache.clear()
+            _thumbnailCacheSize.value = 0L
+        }
+    }
+
+    fun setThumbnailCacheEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setThumbnailCacheEnabled(enabled) }
+    }
+
+    fun setThumbnailCacheMb(mb: Int) {
+        viewModelScope.launch { settingsRepository.setThumbnailCacheMb(mb) }
+    }
+
+    /** 充电时补齐老图片缩略图（一次性任务，只读照片）。 */
+    fun backfillThumbnails() = container.requestThumbnailBackfill()
+
+    fun cancelBackfillThumbnails() = container.cancelThumbnailBackfill()
+
+    // ---- 批量收藏 ----
+
+    suspend fun setFavorites(ids: Collection<Long>, favorite: Boolean) =
+        repository.setLocalFavorites(ids, favorite)
 
     companion object {
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {

@@ -19,4 +19,8 @@ data class AppSettings(
     val showMeta: Boolean = true,
     /** 新进图库时的默认排序。 */
     val defaultSort: SortOrder = SortOrder.DATE_DESC,
+    /** 缩略图磁盘缓存开关；关闭后网格直接用原图（老图片会慢一些）。 */
+    val thumbnailCacheEnabled: Boolean = true,
+    /** 缩略图磁盘缓存上限（MB）。 */
+    val thumbnailCacheMb: Int = 1024,
 )

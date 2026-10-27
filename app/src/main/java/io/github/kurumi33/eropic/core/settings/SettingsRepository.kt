@@ -21,6 +21,8 @@ class SettingsRepository(private val context: Context) {
         val GRID_COLUMNS = intPreferencesKey("grid_columns")
         val SHOW_META = booleanPreferencesKey("show_meta")
         val DEFAULT_SORT = stringPreferencesKey("default_sort")
+        val THUMBNAIL_CACHE_ENABLED = booleanPreferencesKey("thumbnail_cache_enabled")
+        val THUMBNAIL_CACHE_MB = intPreferencesKey("thumbnail_cache_mb")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { prefs ->
@@ -33,6 +35,8 @@ class SettingsRepository(private val context: Context) {
             showMeta = prefs[Keys.SHOW_META] ?: defaults.showMeta,
             defaultSort = prefs[Keys.DEFAULT_SORT]?.let { runCatching { SortOrder.valueOf(it) }.getOrNull() }
                 ?: defaults.defaultSort,
+            thumbnailCacheEnabled = prefs[Keys.THUMBNAIL_CACHE_ENABLED] ?: defaults.thumbnailCacheEnabled,
+            thumbnailCacheMb = (prefs[Keys.THUMBNAIL_CACHE_MB] ?: defaults.thumbnailCacheMb).coerceIn(128, 4096),
         )
     }
 
@@ -46,4 +50,10 @@ class SettingsRepository(private val context: Context) {
     suspend fun setShowMeta(enabled: Boolean) = context.settingsDataStore.edit { it[Keys.SHOW_META] = enabled }
 
     suspend fun setDefaultSort(sort: SortOrder) = context.settingsDataStore.edit { it[Keys.DEFAULT_SORT] = sort.name }
+
+    suspend fun setThumbnailCacheEnabled(enabled: Boolean) =
+        context.settingsDataStore.edit { it[Keys.THUMBNAIL_CACHE_ENABLED] = enabled }
+
+    suspend fun setThumbnailCacheMb(mb: Int) =
+        context.settingsDataStore.edit { it[Keys.THUMBNAIL_CACHE_MB] = mb.coerceIn(128, 4096) }
 }

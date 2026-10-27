@@ -7,6 +7,8 @@ import androidx.paging.PagingData
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
 import io.github.kurumi33.eropic.core.model.FolderRow
+import io.github.kurumi33.eropic.core.query.MediaFilter
+import io.github.kurumi33.eropic.core.query.MediaFilterSql
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -64,6 +66,20 @@ class MediaRepository(
         )
     )
 
+    /** M2 组合筛选（大小/分辨率/格式/日期/收藏/目录），分页配置与图库一致。 */
+    fun pagingData(filter: MediaFilter, sort: SortOrder = SortOrder.DATE_DESC): Flow<PagingData<MediaEntity>> =
+        Pager(
+            config = pagingConfig,
+            pagingSourceFactory = {
+                // MediaFilterSql 不追加 id 兜底，这里补上，保证分页稳定。
+                mediaDao.pagingSourceRaw(MediaFilterSql.toQuery("*", filter, sort.sql + ", id DESC"))
+            },
+        ).flow
+
+    /** 与 filter 分页同一口径的有序 id 列表（给查看器用）。 */
+    suspend fun ids(filter: MediaFilter, sort: SortOrder = SortOrder.DATE_DESC): List<Long> =
+        mediaDao.idsRaw(MediaFilterSql.toQuery("id", filter, sort.sql + ", id DESC"))
+
     suspend fun byId(id: Long): MediaEntity? = mediaDao.byId(id)
 
     /** 切换本地收藏，返回切换后的状态。 */
@@ -109,6 +125,16 @@ class MediaRepository(
     suspend fun itemsNeedingSignature(limit: Int): List<MediaEntity> = mediaDao.itemsNeedingSignature(limit)
 
     suspend fun hashedItems(): List<MediaEntity> = mediaDao.hashedItems()
+
+    /** 键集分页遍历（id 递增），供后台任务使用。 */
+    suspend fun pagePresentItems(afterId: Long, limit: Int): List<MediaEntity> =
+        mediaDao.pagePresentItems(afterId, limit)
+
+    /** 批量收藏/取消收藏（只改 App 内的 localFavorite，不写回系统相册）。 */
+    suspend fun setLocalFavorites(ids: Collection<Long>, favorite: Boolean) {
+        if (ids.isEmpty()) return
+        ids.chunked(500).forEach { mediaDao.setLocalFavoriteBatch(it, favorite) }
+    }
 
     suspend fun updateSignature(id: Long, dhash: Long, phash: Long, blur: Double) = mediaDao.updateSignature(id, dhash, phash, blur)
 

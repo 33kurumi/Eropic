@@ -49,6 +49,9 @@ interface MediaDao {
     @Query("UPDATE media_item SET localFavorite = :favorite WHERE id = :id")
     suspend fun setLocalFavorite(id: Long, favorite: Boolean)
 
+    @Query("UPDATE media_item SET localFavorite = :favorite WHERE id IN (:ids)")
+    suspend fun setLocalFavoriteBatch(ids: List<Long>, favorite: Boolean)
+
     @Query("SELECT relativePath, COUNT(*) AS mediaCount, SUM(sizeBytes) AS totalBytes FROM media_item WHERE isPresent = 1 GROUP BY relativePath")
     suspend fun folderRows(): List<FolderRow>
 
@@ -57,6 +60,10 @@ interface MediaDao {
 
     @Query("SELECT * FROM media_item WHERE isPresent = 1 AND signatureVersion = 0 ORDER BY dateTakenMs DESC LIMIT :limit")
     suspend fun itemsNeedingSignature(limit: Int): List<MediaEntity>
+
+    /** 按 id 键集分页：后台补缩略图等"遍历全库"的任务用它，避免 OFFSET 越翻越慢。 */
+    @Query("SELECT * FROM media_item WHERE isPresent = 1 AND id > :afterId ORDER BY id LIMIT :limit")
+    suspend fun pagePresentItems(afterId: Long, limit: Int): List<MediaEntity>
 
     @Query("SELECT * FROM media_item WHERE isPresent = 1 AND dhash IS NOT NULL")
     suspend fun hashedItems(): List<MediaEntity>

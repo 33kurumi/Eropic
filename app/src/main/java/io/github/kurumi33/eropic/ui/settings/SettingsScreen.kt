@@ -26,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,7 +52,11 @@ fun SettingsScreen(viewModel: EropicViewModel) {
     val count by viewModel.count.collectAsStateWithLifecycle()
     val totalSize by viewModel.totalSize.collectAsStateWithLifecycle()
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
+    val thumbnailCacheSize by viewModel.thumbnailCacheSize.collectAsStateWithLifecycle()
     var showRebuildDialog by remember { mutableStateOf(false) }
+
+    // 进设置页时刷新一次缓存占用（目录扫描，动作用户可见时才做）。
+    LaunchedEffect(Unit) { viewModel.refreshThumbnailCacheSize() }
     val versionName = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
@@ -68,6 +73,12 @@ fun SettingsScreen(viewModel: EropicViewModel) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             AppearanceCard(settings = settings, viewModel = viewModel)
+
+            ThumbnailCacheCard(
+                settings = settings,
+                cacheSizeBytes = thumbnailCacheSize,
+                viewModel = viewModel,
+            )
 
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -89,9 +100,9 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "M1 范围", style = MaterialTheme.typography.titleMedium)
+                    Text(text = "M1.5 范围", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "当前版本：只读浏览 + 指纹 + 精确/相似重复分组 + 大图查看 + 文件夹聚合 + 本地收藏。" +
+                        text = "只读浏览 + 缩略图缓存 + 自动同步 + 多选（收藏/分享）+ 指纹 + 精确/相似重复分组 + 大图查看 + 文件夹聚合。" +
                             "回收站、真实移动、批量清理将在后续里程碑实现。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -205,6 +216,59 @@ private fun AppearanceCard(settings: AppSettings, viewModel: EropicViewModel) {
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThumbnailCacheCard(
+    settings: AppSettings,
+    cacheSizeBytes: Long,
+    viewModel: EropicViewModel,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(text = "缩略图缓存", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = "图库网格改用 320px 小图，滚动更省内存和电。缓存存在应用缓存目录，不会动你的照片；" +
+                    "清空或卸载随时可丢弃，之后会按需重建。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "当前占用 " + formatBytes(cacheSizeBytes),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+
+            SettingSwitchRow(
+                title = "启用缩略图缓存",
+                subtitle = "关闭后网格直接读原图，老照片多时会明显变慢。",
+                checked = settings.thumbnailCacheEnabled,
+                onCheckedChange = viewModel::setThumbnailCacheEnabled,
+            )
+
+            Text(text = "缓存上限", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(512, 1024, 2048).forEach { mb ->
+                    FilterChip(
+                        selected = settings.thumbnailCacheMb == mb,
+                        onClick = { viewModel.setThumbnailCacheMb(mb) },
+                        label = { Text(if (mb >= 1024) (mb / 1024).toString() + " GB" else mb.toString() + " MB") },
+                    )
+                }
+            }
+            Text(
+                text = "超出上限时自动删除最久没用的缓存。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    viewModel.clearThumbnailCache()
+                }) { Text("清空缓存") }
+                OutlinedButton(onClick = viewModel::backfillThumbnails) { Text("充电时补齐") }
             }
         }
     }

@@ -4,6 +4,7 @@ import android.content.Context
 import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.media.MediaRepository
+import io.github.kurumi33.eropic.core.thumb.ThumbnailCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,6 +44,7 @@ class IndexCoordinator(
     private val signatureGenerator: SignatureGenerator,
     private val duplicateScanner: DuplicateScanner,
     database: EropicDatabase,
+    private val thumbnailCache: ThumbnailCache,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow(IndexState())
@@ -119,6 +121,8 @@ class IndexCoordinator(
                     message = "正在查找相似图片…",
                 )
                 val near = duplicateScanner.scanNear()
+                // 索引期间写了缩略图，结束顺手按上限裁掉最旧的（失败不影响索引结果）。
+                runCatching { thumbnailCache.trim() }
                 _state.value = _state.value.copy(
                     phase = IndexPhase.DONE,
                     exactGroups = exact.groups,
