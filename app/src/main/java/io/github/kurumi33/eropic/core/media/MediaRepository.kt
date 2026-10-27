@@ -142,6 +142,11 @@ class MediaRepository(
 
     suspend fun countNeedingSignature(): Int = mediaDao.countNeedingSignature()
 
+    /** 已算过指纹的数量：用于判断上次索引是否被中断（自动续算判断）。 */
+    suspend fun countHashed(): Int = mediaDao.countHashed()
+
+    suspend fun byIds(ids: List<Long>): List<MediaEntity> = mediaDao.byIds(ids)
+
     /** 标记无法解码/不支持的条目，跳过指纹计算（否则下一批查询会再次取到它们）。 */
     suspend fun markSignatureUnsupported(ids: List<Long>) {
         if (ids.isEmpty()) return

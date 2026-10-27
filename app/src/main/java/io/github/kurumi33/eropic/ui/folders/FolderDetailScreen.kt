@@ -34,9 +34,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatCount
+import io.github.kurumi33.eropic.ui.components.ConfirmDialog
 import io.github.kurumi33.eropic.ui.components.MediaGrid
 import io.github.kurumi33.eropic.ui.components.SelectionTopBar
 import io.github.kurumi33.eropic.ui.components.shareImages
+import io.github.kurumi33.eropic.ui.trash.MoveDialog
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -47,6 +49,7 @@ fun FolderDetailScreen(
     folderName: String,
     onBack: () -> Unit,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
+    hasWriteAccess: Boolean = false,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -63,6 +66,8 @@ fun FolderDetailScreen(
 
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val selectionActive = selectedIds.isNotEmpty()
+    var moveTargetIds by remember { mutableStateOf<List<Long>?>(null) }
+    var trashTargetIds by remember { mutableStateOf<List<Long>?>(null) }
 
     Column(Modifier.fillMaxSize()) {
         if (selectionActive) {
@@ -89,6 +94,9 @@ fun FolderDetailScreen(
                     }
                 },
                 onShare = { shareImages(context, selectedIds) },
+                onMove = { moveTargetIds = selectedIds.toList() },
+                onTrash = { trashTargetIds = selectedIds.toList() },
+                hasWriteAccess = hasWriteAccess,
             )
         } else {
             TopAppBar(
@@ -168,6 +176,34 @@ fun FolderDetailScreen(
                 )
             }
         }
+    }
+
+    moveTargetIds?.let { ids ->
+        MoveDialog(
+            viewModel = viewModel,
+            mediaIds = ids,
+            onDismiss = { moveTargetIds = null },
+            onMessage = { text ->
+                viewModel.postMessage(text)
+                selectedIds = emptySet()
+            },
+        )
+    }
+
+    trashTargetIds?.let { ids ->
+        ConfirmDialog(
+            title = "移入回收站",
+            text = "将把 " + ids.size + " 张图片移入回收站，30 天内可恢复，不会立即删除。",
+            confirmText = "移入回收站",
+            onConfirm = {
+                scope.launch {
+                    val result = viewModel.moveToTrash(ids)
+                    viewModel.postMessage(result.message, undoTrashIds = result.trashIds)
+                    selectedIds = emptySet()
+                }
+            },
+            onDismiss = { trashTargetIds = null },
+        )
     }
 }
 

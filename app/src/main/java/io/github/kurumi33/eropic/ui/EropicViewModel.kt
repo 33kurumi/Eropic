@@ -10,7 +10,13 @@ import androidx.paging.cachedIn
 import io.github.kurumi33.eropic.AppContainer
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
+import io.github.kurumi33.eropic.core.fileops.MoveResult
 import io.github.kurumi33.eropic.core.index.IndexState
+import io.github.kurumi33.eropic.core.permissions.StorageAccess
+import io.github.kurumi33.eropic.core.trash.DeleteResult
+import io.github.kurumi33.eropic.core.trash.RestoreResult
+import io.github.kurumi33.eropic.core.trash.TrashResult
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileResult
 import io.github.kurumi33.eropic.core.model.FolderRow
@@ -31,6 +37,17 @@ import java.io.File
 
 /** 大图查看器目标：有序 id 列表 + 起始位置。放在 ViewModel 里以便旋转屏幕后不丢。 */
 data class ViewerTarget(val ids: List<Long>, val startIndex: Int)
+
+/**
+ * 一次性界面提示（Snackbar）。
+ *
+ * [undoTrashIds] 非空时提示条会带一个「撤销」按钮，点了就把这些条目从回收站恢复——
+ * 这是"删除可撤销"的最后一道保险，比二次确认对话框更符合移动端习惯。
+ */
+data class UiMessage(
+    val text: String,
+    val undoTrashIds: List<Long>? = null,
+)
 
 class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
@@ -192,8 +209,9 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch { settingsRepository.setThumbnailCacheMb(mb) }
     }
 
-    /** 充电时补齐老图片缩略图（一次性任务，只读照片）。 */
-    fun backfillThumbnails() = container.requestThumbnailBackfill()
+    /** 补齐老图片缩略图（一次性任务，只读照片）；是否仅充电时执行由设置决定。 */
+    fun backfillThumbnails() =
+        container.requestThumbnailBackfill(settings.value.thumbnailBackfillChargingOnly)
 
     fun cancelBackfillThumbnails() = container.cancelThumbnailBackfill()
 
@@ -201,6 +219,67 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     suspend fun setFavorites(ids: Collection<Long>, favorite: Boolean) =
         repository.setLocalFavorites(ids, favorite)
+
+    // ---- M3 回收站（删除先移入回收目录，默认保留 30 天，可一键恢复） ----
+
+    private val trashRepository = container.trashRepository
+
+    val trashItems: StateFlow<List<TrashItemEntity>> = trashRepository.items
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val trashCount: StateFlow<Int> = trashRepository.countFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    val trashTotalBytes: StateFlow<Long> = trashRepository.totalBytesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
+
+    /** 移入回收站（同卷 rename，瞬时完成；不是删除）。 */
+    suspend fun moveToTrash(ids: List<Long>): TrashResult = trashRepository.moveToTrash(ids)
+
+    suspend fun restoreFromTrash(ids: List<Long>): RestoreResult = trashRepository.restore(ids)
+
+    suspend fun deleteFromTrashPermanently(ids: List<Long>): DeleteResult =
+        trashRepository.deletePermanently(ids)
+
+    suspend fun emptyTrashNow(): DeleteResult = trashRepository.emptyTrash()
+
+    // ---- M3 真实移动（改变实际存储路径） ----
+
+    suspend fun moveTargetFolders(): List<String> = container.moveRepository.targetFolders()
+
+    suspend fun moveMedia(ids: List<Long>, targetRelativePath: String): MoveResult =
+        container.moveRepository.moveTo(ids, targetRelativePath)
+
+    // ---- 一次性提示（Snackbar + 撤销） ----
+
+    private val _messages = kotlinx.coroutines.flow.MutableSharedFlow<UiMessage>(
+        extraBufferCapacity = 8,
+    )
+    val messages: kotlinx.coroutines.flow.SharedFlow<UiMessage> = _messages
+
+    fun postMessage(text: String, undoTrashIds: List<Long>? = null) {
+        _messages.tryEmit(UiMessage(text, undoTrashIds))
+    }
+
+    /** 撤销一次"移入回收站"。 */
+    suspend fun undoTrash(trashIds: List<Long>) {
+        val result = restoreFromTrash(trashIds)
+        postMessage(result.message)
+    }
+
+    // ---- M3 权限状态 ----
+
+    fun hasAllFilesAccess(): Boolean = StorageAccess.hasAllFilesAccess()
+
+    // ---- 后台与电量设置 ----
+
+    fun setThumbnailBackfillChargingOnly(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setThumbnailBackfillChargingOnly(enabled) }
+    }
+
+    fun setAutoResumeIndex(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setAutoResumeIndex(enabled) }
+    }
 
     companion object {
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {

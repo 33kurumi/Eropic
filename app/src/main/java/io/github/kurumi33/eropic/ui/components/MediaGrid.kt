@@ -22,8 +22,11 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.Circle
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,7 +37,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -210,7 +216,11 @@ fun SelectionTopBar(
     onFavorite: () -> Unit,
     onUnfavorite: () -> Unit,
     onShare: () -> Unit,
+    onMove: (() -> Unit)? = null,
+    onTrash: (() -> Unit)? = null,
+    hasWriteAccess: Boolean = true,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onClose) {
@@ -230,6 +240,37 @@ fun SelectionTopBar(
             }
             IconButton(onClick = onShare) {
                 Icon(imageVector = Icons.Filled.Share, contentDescription = "分享所选")
+            }
+            // 写操作（移动/移入回收站）只在调用方提供了回调时出现：
+            // 例如清理页的历史分组不允许直接删，只允许在对比后由用户决定。
+            if (onMove != null || onTrash != null) {
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "更多操作")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        if (onMove != null) {
+                            DropdownMenuItem(
+                                text = { Text("移动到文件夹…") },
+                                enabled = hasWriteAccess,
+                                onClick = {
+                                    menuOpen = false
+                                    onMove()
+                                },
+                            )
+                        }
+                        if (onTrash != null) {
+                            DropdownMenuItem(
+                                text = { Text("移入回收站") },
+                                enabled = hasWriteAccess,
+                                onClick = {
+                                    menuOpen = false
+                                    onTrash()
+                                },
+                            )
+                        }
+                    }
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(

@@ -23,4 +23,8 @@ data class AppSettings(
     val thumbnailCacheEnabled: Boolean = true,
     /** 缩略图磁盘缓存上限（MB）。 */
     val thumbnailCacheMb: Int = 1024,
+    /** 缩略图补齐是否只在充电时做（false = 不插电也补，耗电略高但更快备齐）。 */
+    val thumbnailBackfillChargingOnly: Boolean = true,
+    /** 启动时自动续算被打断的指纹任务（只续算，不会在全新安装上擅自开始全量扫描）。 */
+    val autoResumeIndex: Boolean = true,
 )

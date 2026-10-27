@@ -23,6 +23,8 @@ class SettingsRepository(private val context: Context) {
         val DEFAULT_SORT = stringPreferencesKey("default_sort")
         val THUMBNAIL_CACHE_ENABLED = booleanPreferencesKey("thumbnail_cache_enabled")
         val THUMBNAIL_CACHE_MB = intPreferencesKey("thumbnail_cache_mb")
+        val THUMBNAIL_BACKFILL_CHARGING_ONLY = booleanPreferencesKey("thumbnail_backfill_charging_only")
+        val AUTO_RESUME_INDEX = booleanPreferencesKey("auto_resume_index")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { prefs ->
@@ -37,6 +39,9 @@ class SettingsRepository(private val context: Context) {
                 ?: defaults.defaultSort,
             thumbnailCacheEnabled = prefs[Keys.THUMBNAIL_CACHE_ENABLED] ?: defaults.thumbnailCacheEnabled,
             thumbnailCacheMb = (prefs[Keys.THUMBNAIL_CACHE_MB] ?: defaults.thumbnailCacheMb).coerceIn(128, 4096),
+            thumbnailBackfillChargingOnly = prefs[Keys.THUMBNAIL_BACKFILL_CHARGING_ONLY]
+                ?: defaults.thumbnailBackfillChargingOnly,
+            autoResumeIndex = prefs[Keys.AUTO_RESUME_INDEX] ?: defaults.autoResumeIndex,
         )
     }
 
@@ -56,4 +61,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setThumbnailCacheMb(mb: Int) =
         context.settingsDataStore.edit { it[Keys.THUMBNAIL_CACHE_MB] = mb.coerceIn(128, 4096) }
+
+    suspend fun setThumbnailBackfillChargingOnly(enabled: Boolean) =
+        context.settingsDataStore.edit { it[Keys.THUMBNAIL_BACKFILL_CHARGING_ONLY] = enabled }
+
+    suspend fun setAutoResumeIndex(enabled: Boolean) =
+        context.settingsDataStore.edit { it[Keys.AUTO_RESUME_INDEX] = enabled }
 }

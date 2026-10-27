@@ -26,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,8 +36,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.core.index.IndexPhase
+import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.settings.AppSettings
 import io.github.kurumi33.eropic.core.settings.ThemeMode
@@ -54,6 +59,19 @@ fun SettingsScreen(viewModel: EropicViewModel) {
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val thumbnailCacheSize by viewModel.thumbnailCacheSize.collectAsStateWithLifecycle()
     var showRebuildDialog by remember { mutableStateOf(false) }
+
+    // 「所有文件访问」是系统设置页授权的，回到应用时要重新读一次真实状态。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var hasWriteAccess by remember { mutableStateOf(viewModel.hasAllFilesAccess()) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasWriteAccess = viewModel.hasAllFilesAccess()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // 进设置页时刷新一次缓存占用（目录扫描，动作用户可见时才做）。
     LaunchedEffect(Unit) { viewModel.refreshThumbnailCacheSize() }
@@ -80,6 +98,15 @@ fun SettingsScreen(viewModel: EropicViewModel) {
                 viewModel = viewModel,
             )
 
+            BackgroundCard(settings = settings, viewModel = viewModel)
+
+            StorageAccessCard(
+                hasWriteAccess = hasWriteAccess,
+                onRequestAccess = {
+                    runCatching { context.startActivity(StorageAccess.requestIntent(context)) }
+                },
+            )
+
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(text = "本地索引", style = MaterialTheme.typography.titleMedium)
@@ -100,10 +127,11 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "M1.5 范围", style = MaterialTheme.typography.titleMedium)
+                    Text(text = "M3 范围", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "只读浏览 + 缩略图缓存 + 自动同步 + 多选（收藏/分享）+ 指纹 + 精确/相似重复分组 + 大图查看 + 文件夹聚合。" +
-                            "回收站、真实移动、批量清理将在后续里程碑实现。",
+                        text = "已实现：浏览/排序/收藏/查看器、文件夹树与聚合、缩略图磁盘缓存、自动同步、多选、" +
+                            "指纹与精确/相似重复分组、六类清理入口与组合筛选、对比预览、保留建议、" +
+                            "真实移动文件、回收站（30 天，可撤销/恢复/彻底删除）。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -274,6 +302,62 @@ private fun ThumbnailCacheCard(
     }
 }
 
+@Composable
+private fun BackgroundCard(settings: AppSettings, viewModel: EropicViewModel) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(text = "后台与电量", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = "计算指纹、查重是重活，只在你在应用内点「开始」或自动续算时跑，不会常驻后台。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            SettingSwitchRow(
+                title = "仅充电时补齐缩略图",
+                subtitle = "关闭后未充电也会在后台补齐缩略图缓存，耗电与发热会略高。",
+                checked = settings.thumbnailBackfillChargingOnly,
+                onCheckedChange = viewModel::setThumbnailBackfillChargingOnly,
+            )
+
+            SettingSwitchRow(
+                title = "启动时自动续算中断的索引",
+                subtitle = "上次算到一半被系统杀掉时，下次打开应用自动接着算；关闭后只在你手动点「开始」时继续。",
+                checked = settings.autoResumeIndex,
+                onCheckedChange = viewModel::setAutoResumeIndex,
+            )
+        }
+    }
+}
+
+@Composable
+private fun StorageAccessCard(
+    hasWriteAccess: Boolean,
+    onRequestAccess: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(text = "文件权限", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = if (hasWriteAccess) {
+                    "已授予「所有文件访问」：可以真实移动文件、把图片移入 Eropic 回收站并恢复。";
+                } else {
+                    "浏览与查重不需要这个权限。只有真实移动、移入回收站/恢复/彻底删除才需要它；" +
+                        "未授权时这些入口会置灰，其他功能不受影响。";
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "状态：" + if (hasWriteAccess) "已授予" else "未授予",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (!hasWriteAccess) {
+                Button(onClick = onRequestAccess) { Text("去系统设置授权") }
+            }
+        }
+    }
+}
 @Composable
 private fun SettingSwitchRow(
     title: String,

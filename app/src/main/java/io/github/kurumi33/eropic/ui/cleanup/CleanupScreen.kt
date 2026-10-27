@@ -49,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
+import io.github.kurumi33.eropic.core.cleanup.KeepCandidate
+import io.github.kurumi33.eropic.core.cleanup.KeepSuggestion
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.index.IndexPhase
@@ -58,6 +60,7 @@ import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.common.formatMediaSubtitle
+import kotlinx.coroutines.launch
 import java.io.File
 
 /** 清理页的六个入口。前两个来自查重分组，后四个来自检测器。 */
@@ -82,7 +85,9 @@ private sealed interface CleanupContent {
 fun CleanupScreen(
     viewModel: EropicViewModel,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
+    hasWriteAccess: Boolean = false,
 ) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
 
@@ -237,7 +242,15 @@ fun CleanupScreen(
                                 group = group,
                                 loadMembers = viewModel::members,
                                 loadThumbnail = viewModel::thumbnailFile,
+                                hasWriteAccess = hasWriteAccess,
                                 onCompare = { compareGroupId = group.groupId },
+                                onApplyKeep = { suggestion ->
+                                    scope.launch {
+                                        val result = viewModel.moveToTrash(suggestion.trashIds)
+                                        viewModel.postMessage(result.message, undoTrashIds = result.trashIds)
+                                        refreshToken++
+                                    }
+                                },
                             )
                         }
                     }
@@ -336,10 +349,10 @@ private fun ReadOnlyNotice() {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(text = "只读检索", style = MaterialTheme.typography.titleSmall)
+            Text(text = "不自动删除", style = MaterialTheme.typography.titleSmall)
             Text(
                 text = "Eropic 只负责找候选，不会自动删除或移动任何文件。" +
-                    "删除、真实移动、回收站会在 M3 里由你逐组确认后执行。",
+                    "所有写操作都要你逐组确认；删除只是移入回收站，30 天内可随时恢复。",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -351,12 +364,32 @@ private fun GroupCard(
     group: DuplicateGroupEntity,
     loadMembers: suspend (Long) -> List<MediaEntity>,
     loadThumbnail: suspend (MediaEntity) -> File?,
+    hasWriteAccess: Boolean,
     onCompare: () -> Unit,
+    onApplyKeep: (KeepSuggestion) -> Unit,
 ) {
     val members by produceState(initialValue = emptyList<MediaEntity>(), group.groupId) {
         value = loadMembers(group.groupId)
     }
     val isExact = group.kind == DuplicateScanner.KIND_EXACT
+    var showKeepDialog by remember { mutableStateOf(false) }
+    if (showKeepDialog) {
+        KeepStrategyDialog(
+            candidates = members.map {
+                KeepCandidate(
+                    id = it.id,
+                    sizeBytes = it.sizeBytes,
+                    dateTakenMs = it.dateTakenMs,
+                    path = it.path,
+                )
+            },
+            onDismiss = { showKeepDialog = false },
+            onApply = { suggestion ->
+                showKeepDialog = false
+                onApplyKeep(suggestion)
+            },
+        )
+    }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -385,7 +418,17 @@ private fun GroupCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onCompare, enabled = members.size >= 2) { Text("对比预览") }
-                TextButton(onClick = {}, enabled = false) { Text("选择保留（M3）") }
+                TextButton(
+                    onClick = { showKeepDialog = true },
+                    enabled = hasWriteAccess && members.size >= 2,
+                ) { Text("选择保留") }
+                if (!hasWriteAccess) {
+                    Text(
+                        text = "未授予「所有文件访问」权限，写操作已禁用",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }

@@ -95,4 +95,15 @@ interface MediaDao {
 
     @Query("SELECT COUNT(*) FROM media_item")
     suspend fun countAll(): Int
+
+    /** 已算过指纹的数量：用于判断上次索引是否被中途打断（已算 > 0 且还有未算 = 被打断）。 */
+    @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1 AND signatureVersion > 0")
+    suspend fun countHashed(): Int
+
+    @Query("DELETE FROM media_item WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
+
+    /** 真实移动文件后立刻改写索引里的位置，避免界面还显示旧目录（随后同步会再校正 MediaStore 新 id）。 */
+    @Query("UPDATE media_item SET path = :path, relativePath = :relativePath, bucketId = :bucketId, bucketName = :bucketName WHERE id = :id")
+    suspend fun updateLocation(id: Long, path: String, relativePath: String, bucketId: Long, bucketName: String)
 }

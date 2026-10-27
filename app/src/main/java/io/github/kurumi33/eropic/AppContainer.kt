@@ -7,8 +7,10 @@ import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileDetector
 import io.github.kurumi33.eropic.core.analysis.detectors.OldPhotoDetector
 import io.github.kurumi33.eropic.core.analysis.detectors.ScreenshotDetector
 import io.github.kurumi33.eropic.core.database.EropicDatabase
+import io.github.kurumi33.eropic.core.fileops.MoveRepository
 import io.github.kurumi33.eropic.core.index.IndexCoordinator
 import io.github.kurumi33.eropic.core.index.SignatureGenerator
+import io.github.kurumi33.eropic.core.trash.TrashRepository
 import io.github.kurumi33.eropic.core.media.MediaRepository
 import io.github.kurumi33.eropic.core.settings.SettingsRepository
 import io.github.kurumi33.eropic.core.thumb.ThumbnailBackfill
@@ -44,8 +46,14 @@ class AppContainer(context: Context) {
     val screenshotDetector: ScreenshotDetector = ScreenshotDetector(detectionDao)
     val blurDetector: BlurDetector = BlurDetector(detectionDao)
 
-    /** 充电时补齐老图片的缩略图（只读照片，不改动用户文件）。 */
-    fun requestThumbnailBackfill() = ThumbnailBackfill.enqueue(appContext)
+    // ---- M3 写操作（真实移动 / 回收站；需要 MANAGE_EXTERNAL_STORAGE） ----
+
+    val trashRepository: TrashRepository = TrashRepository(appContext, database)
+    val moveRepository: MoveRepository = MoveRepository(appContext, database)
+
+    /** 补齐老图片的缩略图；requiresCharging 由设置决定。 */
+    fun requestThumbnailBackfill(requiresCharging: Boolean) =
+        ThumbnailBackfill.enqueue(appContext, requiresCharging)
 
     fun cancelThumbnailBackfill() = ThumbnailBackfill.cancel(appContext)
 }

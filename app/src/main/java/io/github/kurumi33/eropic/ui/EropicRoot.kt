@@ -1,6 +1,5 @@
 package io.github.kurumi33.eropic.ui
 
-import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -11,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
@@ -18,9 +18,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -28,27 +33,31 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.ui.cleanup.CleanupScreen
 import io.github.kurumi33.eropic.ui.folders.FoldersSection
 import io.github.kurumi33.eropic.ui.gallery.GalleryScreen
-import io.github.kurumi33.eropic.ui.viewer.ImageViewerScreen
-import io.github.kurumi33.eropic.ui.permission.MediaAccess
 import io.github.kurumi33.eropic.ui.permission.MediaPermissions
 import io.github.kurumi33.eropic.ui.permission.PermissionScreen
 import io.github.kurumi33.eropic.ui.settings.SettingsScreen
+import io.github.kurumi33.eropic.ui.trash.TrashSection
+import io.github.kurumi33.eropic.ui.viewer.ImageViewerScreen
 
-private data class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
+private data class Tab(val label: String, val icon: ImageVector)
 
 @Composable
 fun EropicRoot(viewModel: EropicViewModel) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var access by remember { mutableStateOf(MediaPermissions.evaluate(context)) }
+    // "所有文件访问"是 M3 写操作（移动/回收站）的前提，授予状态可能随时被用户在系统设置里改，
+    // 因此每次回到前台都重新读一次，而不是只在启动时读。
+    var hasWriteAccess by remember { mutableStateOf(viewModel.hasAllFilesAccess()) }
 
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions(),
@@ -60,6 +69,7 @@ fun EropicRoot(viewModel: EropicViewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 access = MediaPermissions.evaluate(context)
+                hasWriteAccess = viewModel.hasAllFilesAccess()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -91,18 +101,37 @@ fun EropicRoot(viewModel: EropicViewModel) {
         return
     }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // 一次性提示统一在这里消费：写操作后的结果、以及"撤销"入口。
+    LaunchedEffect(Unit) {
+        viewModel.messages.collect { message ->
+            val result = snackbarHostState.showSnackbar(
+                message = message.text,
+                actionLabel = if (message.undoTrashIds != null) "撤销" else null,
+                withDismissAction = true,
+                duration = if (message.undoTrashIds != null) SnackbarDuration.Long else SnackbarDuration.Short,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                message.undoTrashIds?.let { ids -> viewModel.undoTrash(ids) }
+            }
+        }
+    }
+
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
     val tabs = remember {
         listOf(
             Tab("图库", Icons.Filled.PhotoLibrary),
             Tab("文件夹", Icons.Filled.Folder),
             Tab("清理", Icons.Filled.CleaningServices),
+            Tab("回收站", Icons.Filled.Delete),
             Tab("设置", Icons.Filled.Settings),
         )
     }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             NavigationBar {
                 tabs.forEachIndexed { index, tab ->
@@ -123,14 +152,22 @@ fun EropicRoot(viewModel: EropicViewModel) {
                     access = access,
                     onRequestFullAccess = { launcher.launch(MediaPermissions.required()) },
                     onOpenViewer = viewModel::openViewer,
+                    hasWriteAccess = hasWriteAccess,
                 )
                 1 -> FoldersSection(
                     viewModel = viewModel,
                     onOpenViewer = viewModel::openViewer,
+                    hasWriteAccess = hasWriteAccess,
                 )
                 2 -> CleanupScreen(
                     viewModel = viewModel,
                     onOpenViewer = viewModel::openViewer,
+                    hasWriteAccess = hasWriteAccess,
+                )
+                3 -> TrashSection(
+                    viewModel = viewModel,
+                    hasWriteAccess = hasWriteAccess,
+                    onMessage = { text -> viewModel.postMessage(text) },
                 )
                 else -> SettingsScreen(viewModel)
             }

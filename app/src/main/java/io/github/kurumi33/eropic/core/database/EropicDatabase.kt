@@ -10,10 +10,14 @@ import io.github.kurumi33.eropic.core.analysis.detectors.DetectionDao
 import io.github.kurumi33.eropic.core.database.dao.DuplicateDao
 import io.github.kurumi33.eropic.core.database.dao.HashBandDao
 import io.github.kurumi33.eropic.core.database.dao.MediaDao
+import io.github.kurumi33.eropic.core.database.dao.OperationLogDao
+import io.github.kurumi33.eropic.core.database.dao.TrashDao
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.DuplicateMemberEntity
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.database.entity.OperationLogEntity
+import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
 
 @Database(
     entities = [
@@ -21,8 +25,10 @@ import io.github.kurumi33.eropic.core.database.entity.MediaEntity
         HashBandEntity::class,
         DuplicateGroupEntity::class,
         DuplicateMemberEntity::class,
+        TrashItemEntity::class,
+        OperationLogEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class EropicDatabase : RoomDatabase() {
@@ -31,6 +37,8 @@ abstract class EropicDatabase : RoomDatabase() {
     abstract fun hashBandDao(): HashBandDao
     abstract fun duplicateDao(): DuplicateDao
     abstract fun detectionDao(): DetectionDao
+    abstract fun trashDao(): TrashDao
+    abstract fun operationLogDao(): OperationLogDao
 
     companion object {
         /**
@@ -52,10 +60,40 @@ abstract class EropicDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v2 -> v3：M3 新增回收站表（trash_item）与写操作日志表（operation_log）。
+         * 只是新增空表，不碰已有索引，因此用户不需要重新扫描 10 万张图。
+         */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `trash_item` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`mediaId` INTEGER NOT NULL, " +
+                        "`displayName` TEXT NOT NULL, " +
+                        "`trashPath` TEXT NOT NULL, " +
+                        "`originalPath` TEXT NOT NULL, " +
+                        "`sizeBytes` INTEGER NOT NULL, " +
+                        "`mimeType` TEXT NOT NULL, " +
+                        "`trashedAtMs` INTEGER NOT NULL, " +
+                        "`expiresAtMs` INTEGER NOT NULL)",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `operation_log` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`type` TEXT NOT NULL, " +
+                        "`summary` TEXT NOT NULL, " +
+                        "`payloadJson` TEXT NOT NULL, " +
+                        "`createdAtMs` INTEGER NOT NULL, " +
+                        "`undone` INTEGER NOT NULL)",
+                )
+            }
+        }
+
         fun build(context: Context): EropicDatabase =
             Room.databaseBuilder(context, EropicDatabase::class.java, "eropic.db")
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 // 兜底：未来新增版本忘了写迁移时，宁可清库重建也不要让 App 启动即崩。
                 .fallbackToDestructiveMigration()
                 .build()

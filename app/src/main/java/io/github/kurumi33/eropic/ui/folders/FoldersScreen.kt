@@ -55,6 +55,7 @@ import io.github.kurumi33.eropic.ui.common.formatCount
 fun FoldersSection(
     viewModel: EropicViewModel,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
+    hasWriteAccess: Boolean = false,
 ) {
     // 展开状态以 node.path 为 key；默认全部收起，点箭头才展开。
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
@@ -77,6 +78,7 @@ fun FoldersSection(
             folderName = node.name,
             onBack = { selectedPath = null },
             onOpenViewer = onOpenViewer,
+            hasWriteAccess = hasWriteAccess,
         )
     } else {
         FolderTreeContent(
