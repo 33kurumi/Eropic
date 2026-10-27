@@ -23,6 +23,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -53,8 +55,12 @@ fun CompareScreen(
     onClose: () -> Unit,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
 ) {
+    // loaded 用来区分「还在查」和「查完是空」：只按 members.isEmpty() 判断会让
+    // 被重新索引清掉的组永远转圈。
+    var loaded by remember(groupId) { mutableStateOf(false) }
     val members by produceState(initialValue = emptyList<MediaEntity>(), groupId) {
         value = viewModel.members(groupId)
+        loaded = true
     }
     var leftIndex by rememberSaveable(groupId) { mutableIntStateOf(0) }
     var rightIndex by rememberSaveable(groupId) { mutableIntStateOf(1) }
@@ -83,7 +89,15 @@ fun CompareScreen(
 
         if (members.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = Color.White)
+                if (loaded) {
+                    Text(
+                        text = "该重复组已不存在（可能刚重新扫描过）",
+                        color = Color.White.copy(alpha = 0.8f),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else {
+                    CircularProgressIndicator(color = Color.White)
+                }
             }
         } else {
             val last = members.lastIndex

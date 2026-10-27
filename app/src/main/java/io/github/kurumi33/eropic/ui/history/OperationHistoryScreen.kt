@@ -66,7 +66,7 @@ fun OperationHistoryScreen(
         scope.launch {
             try {
                 val report = viewModel.undoOperation(record.id)
-                viewModel.publishReport(report)
+                // 只走屏幕路由：同时写 lastReport 会让关掉结果页后它又被顶回来。
                 viewModel.openScreen(AppScreen.Report(report))
             } catch (t: Throwable) {
                 onMessage("撤销失败：" + (t.message ?: t::class.simpleName))

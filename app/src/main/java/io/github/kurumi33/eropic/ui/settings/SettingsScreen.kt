@@ -308,11 +308,26 @@ private fun ThumbnailCacheCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
+            var confirmClear by remember { mutableStateOf(false) }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {
-                    viewModel.clearThumbnailCache()
-                }) { Text("清空缓存") }
+                OutlinedButton(onClick = { confirmClear = true }) { Text("清空缓存") }
                 OutlinedButton(onClick = viewModel::backfillThumbnails) { Text("充电时补齐") }
+            }
+            if (confirmClear) {
+                AlertDialog(
+                    onDismissRequest = { confirmClear = false },
+                    title = { Text("清空缩略图缓存？") },
+                    text = { Text("只删除 cacheDir/thumbs 里的缩略图文件，不会动任何照片；下次浏览会按需重新生成，首屏会略慢。") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirmClear = false
+                            viewModel.clearThumbnailCache()
+                        }) { Text("清空") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmClear = false }) { Text("取消") }
+                    },
+                )
             }
         }
     }

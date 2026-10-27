@@ -16,6 +16,13 @@ data class MediaFilter(
     /** 只看宽/高至少多少像素的图；不区分横竖，直接比较实体里的 width/height。 */
     val widthMin: Int? = null,
     val heightMin: Int? = null,
+    /**
+     * 长边下限（M4 补齐 B-09 的「分辨率」档）：width >= N 或 height >= N 即命中。
+     *
+     * 不能直接用 widthMin 表达"长边≥1080"：竖图的宽可能只有 1080 而高是 1920，
+     * 用 widthMin 会误杀；单独的宽高下限条件无法正确表达"较长的那一边"。
+     */
+    val minLongEdge: Int? = null,
     /** 精确匹配 MIME（如 image/png），大小写按 MediaStore 的约定保持小写。 */
     val mimeTypes: Set<String> = emptySet(),
     /**
@@ -47,6 +54,7 @@ data class MediaFilter(
             sizeMaxBytes == null &&
             widthMin == null &&
             heightMin == null &&
+            minLongEdge == null &&
             mimeTypes.isEmpty() &&
             dateFromMs == null &&
             dateToMs == null &&
@@ -75,7 +83,7 @@ object MediaFilterSql {
      * 返回 [条件片段, 绑定参数]：片段之间用 AND 连接、不含 WHERE 关键字，空条件返回 ""。
      *
      * 调用方负责带上 `isPresent = 1`（见 [toQuery]）；条件顺序固定为
-     * 大小 → 分辨率 → 格式 → 拍摄时间 → 修改时间 → 收藏 → 目录 → 清晰度 → 文件名，
+     * 大小 → 分辨率 → 长边 → 格式 → 拍摄时间 → 修改时间 → 收藏 → 目录 → 清晰度 → 文件名，
      * 参数顺序与片段顺序一一对应，改顺序时务必同步单测。
      */
     fun where(filter: MediaFilter): Pair<String, List<Any>> {
@@ -96,6 +104,12 @@ object MediaFilterSql {
         }
         filter.heightMin?.let {
             clauses += "height >= ?"
+            args += it
+        }
+        filter.minLongEdge?.let {
+            // 长边：宽或高任一不小于阈值即算达到该分辨率
+            clauses += "(width >= ? OR height >= ?)"
+            args += it
             args += it
         }
         if (filter.mimeTypes.isNotEmpty()) {

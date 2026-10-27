@@ -126,7 +126,10 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     fun setRetention(option: RetentionOption) = viewModelScope.launch {
         settingsRepository.setRetention(option)
-        // 保留期调小后立即跑一次过期清理，让新策略马上生效。
+        // 关键：已有条目的到期时间是在"移入回收站"时写死的，必须按新档位重算。
+        // 否则从 30 天改成"永久保留"后，旧条目仍会按旧日期被自动永久删除。
+        container.trashRepository.applyRetention(option.days)
+        // 调小保留期时立刻跑一次清理，让新策略马上生效。
         container.requestTrashCleanup()
     }
 
@@ -222,17 +225,19 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     suspend fun loadFolderRows(): List<FolderRow> = repository.folderRows()
 
+    // 文件夹页不继承图库的「只看收藏」筛选：否则树里显示 500 张、点进去只有 3 张，
+    // 而且那个筛选是图库里的临时状态，用户不会想到它会影响到这里。
     fun folderMedia(path: String, includeSubfolders: Boolean): Flow<PagingData<MediaEntity>> =
         repository.pagingData(
             sort = sortOrder.value,
-            favoritesOnly = _favoritesOnly.value,
+            favoritesOnly = false,
             folderPath = path,
             includeSubfolders = includeSubfolders,
         )
 
     suspend fun folderIds(path: String, includeSubfolders: Boolean): List<Long> = repository.ids(
         sort = sortOrder.value,
-        favoritesOnly = _favoritesOnly.value,
+        favoritesOnly = false,
         folderPath = path,
         includeSubfolders = includeSubfolders,
     )
@@ -253,6 +258,13 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     fun rebuildIndex() {
         viewModelScope.launch {
+            // 先让正在跑的任务停下来（IndexCoordinator.start 在运行中会直接返回，
+            // 否则这里的 clear() 会把索引清空却不会重建）。
+            if (container.indexCoordinator.state.value.isRunning) {
+                container.indexCoordinator.cancel()
+                // 取消是异步生效的：等一下，避免旧任务最后一批落库和 clear() 交错。
+                kotlinx.coroutines.delay(300)
+            }
             repository.clear()
             container.indexCoordinator.start(
                 similarity = settings.value.similarity,
@@ -360,8 +372,22 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     // ---- 批量收藏 ----
 
-    suspend fun setFavorites(ids: Collection<Long>, favorite: Boolean) =
+    /**
+     * 批量收藏/取消收藏。
+     *
+     * 取消收藏只能改 App 内的 localFavorite：系统相册的 IS_FAVORITE 是 MediaStore 字段，
+     * 侧载应用没有写权限，所以这批里属于"系统收藏"的会原样保留，需要在提示里说清楚。
+     * 返回无法取消的张数。
+     */
+    suspend fun setFavorites(ids: Collection<Long>, favorite: Boolean): Int {
         repository.setLocalFavorites(ids, favorite)
+        if (favorite) return 0
+        val systemFavorites = runCatching { repository.countSystemFavorites(ids) }.getOrDefault(0)
+        if (systemFavorites > 0) {
+            postMessage("$systemFavorites 张是系统相册里的收藏，需要在系统相册里取消")
+        }
+        return systemFavorites
+    }
 
     // ---- M3 回收站（删除先移入回收目录，保留期可配，可一键恢复） ----
 

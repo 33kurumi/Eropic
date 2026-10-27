@@ -1,8 +1,11 @@
 package io.github.kurumi33.eropic
 
+import android.app.Activity
 import android.app.Application
+import android.os.Bundle
 import io.github.kurumi33.eropic.core.log.CrashLogger
 import io.github.kurumi33.eropic.core.notify.TrashCleanupScheduler
+import io.github.kurumi33.eropic.core.notify.TrashNotifications
 import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.core.sync.MediaChangeObserver
 import io.github.kurumi33.eropic.core.sync.SyncScheduler
@@ -19,6 +22,9 @@ class EropicApplication : Application() {
 
     /** 进程级协程作用域：只放"跟随应用生命周期"的轻量工作，不阻塞启动。 */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 前台 Activity 计数：用来判断"是不是用户打开了应用"，而不是后台任务把进程唤醒。 */
+    private var startedActivities = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -46,27 +52,55 @@ class EropicApplication : Application() {
         // 4) 冷启动立刻补一次对账，避免"刚拍的照片要等 12 小时才出现"。
         SyncScheduler.requestImmediate(this)
 
-        // 5) 自动续算：上次指纹任务被打断（进程被杀/用户退后台被回收）时，启动后接着算，
-        //    不用用户手动再点"开始扫描"。见 maybeResumeInterruptedIndex()。
-        appScope.launch { maybeResumeInterruptedIndex() }
-
-        // 6) 回收站过期清理：按设置里的保留期清理，超期的文件才真正删除。
-        //    这是用户明示的保留策略，不是"自动删照片"；没有所有文件访问权限时跳过。
-        appScope.launch {
-            runCatching {
-                if (StorageAccess.hasAllFilesAccess()) container.trashRepository.cleanupExpired()
-                // 顺带检查"即将到期"，有的话发一条通知提醒用户决定恢复还是让它到期。
-                val expiring = container.trashRepository.expiringSoon()
-                if (expiring.isNotEmpty()) {
-                    io.github.kurumi33.eropic.core.notify.TrashNotifications.notifyExpiring(
-                        this@EropicApplication,
-                        expiring.size,
-                    )
+        // 5) 自动续算：只在用户真的打开应用时触发，不能在后台任务（WorkManager 唤醒进程）时
+        //    擅自跑全量指纹计算——那是分钟级的解码工作，会被系统当成异常耗电。
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                startedActivities++
+                if (startedActivities == 1) {
+                    appScope.launch { maybeResumeInterruptedIndex() }
+                    appScope.launch { maintainTrash() }
                 }
             }
-        }
-        // 7) 每天兜底清理一次：进程不在时也要能按时清理过期条目。
+
+            override fun onActivityStopped(activity: Activity) {
+                if (startedActivities > 0) startedActivities--
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        })
+
+        // 6) 每天兜底清理一次：进程不在时也要能按时清理过期条目。
         TrashCleanupScheduler.ensurePeriodic(this)
+    }
+
+    /**
+     * 回收站维护：按设置里的保留期重算到期时间，再清理真正过期的条目。
+     *
+     * 重算是必须的：到期时间在"移入回收站"时写死，用户之后把保留期从 30 天改成"永久保留"，
+     * 旧条目否则仍会按 30 天被自动永久删除（那是真丢图，见 ADR-0019）。
+     */
+    private suspend fun maintainTrash() {
+        runCatching {
+            val settings = container.settingsRepository.settings.first()
+            if (StorageAccess.hasAllFilesAccess()) {
+                container.trashRepository.applyRetention(settings.retention.days)
+                container.trashRepository.cleanupExpired()
+            }
+            // 顺带检查"即将到期"，有的话发一条通知提醒用户决定恢复还是让它到期。
+            val expiring = container.trashRepository.expiringSoon()
+            if (expiring.isNotEmpty()) {
+                TrashNotifications.notifyExpiring(this@EropicApplication, expiring.size)
+            }
+            // 操作历史只留最近 90 天：operation_log 只用于撤销/回顾，没有长期价值。
+            container.database.operationLogDao().clearBefore(
+                System.currentTimeMillis() - OPERATION_LOG_RETENTION_MS,
+            )
+        }
     }
 
     /**
@@ -85,5 +119,9 @@ class EropicApplication : Application() {
         if (hashed <= 0) return
         val needing = runCatching { container.mediaRepository.countNeedingSignature() }.getOrDefault(0)
         if (needing > 0) coordinator.start(similarity = settings.similarity, scope = settings.scanScope())
+    }
+
+    companion object {
+        private const val OPERATION_LOG_RETENTION_MS = 90L * 24 * 60 * 60 * 1000
     }
 }

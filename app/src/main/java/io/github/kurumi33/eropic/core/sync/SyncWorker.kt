@@ -31,15 +31,24 @@ class SyncWorker(
             ?: return Result.failure()
 
         return try {
+            // 后台对账必须沿用设置里的扫描范围（隐藏目录/排除目录），
+            // 否则后台一次同步会把用户排除掉的目录又收进索引。
+            val scope = container.settingsRepository.current().scanScope()
             // 后台任务没有进度 UI，进度回调直接丢弃。
-            container.mediaRepository.syncFromMediaStore { _, _ -> }
+            container.mediaRepository.syncFromMediaStore(scope) { _, _ -> }
             Result.success()
         } catch (e: CancellationException) {
             // REPLACE 策略会取消正在跑的旧任务；被取消不是失败，原样抛出交给框架处理。
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "后台同步失败，稍后重试", e)
-            Result.retry()
+            // 关键文件权限这类错误重试再多次也不会自己好，超过 3 次就放弃，等下次前台同步。
+            if (runAttemptCount >= MAX_ATTEMPTS) {
+                Log.w(TAG, "后台同步连续失败，放弃本次", e)
+                Result.failure()
+            } else {
+                Log.w(TAG, "后台同步失败，稍后重试", e)
+                Result.retry()
+            }
         }
     }
 
@@ -64,5 +73,6 @@ class SyncWorker(
 
     companion object {
         private const val TAG = "SyncWorker"
+        private const val MAX_ATTEMPTS = 3
     }
 }

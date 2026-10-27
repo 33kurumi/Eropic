@@ -67,6 +67,11 @@ fun ImageDetailsSheet(entity: MediaEntity, onDismiss: () -> Unit) {
         )
         DetailRow(label = "dHash", value = formatHash(entity.dhash))
         DetailRow(label = "pHash", value = formatHash(entity.phash))
+        DetailRow(
+            label = "SHA-256",
+            value = entity.sha256 ?: "未计算（精确查重扫描时才生成，用于逐字节判定是否为同一文件）",
+        )
+        DetailRow(label = "指纹状态", value = signatureStatusOf(entity.signatureVersion))
         ExifSection(entity = entity)
 
         DetailRow(
@@ -232,6 +237,13 @@ private fun formatDateTime(ms: Long): String {
     if (ms <= 0L) return "未知"
     val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
     return formatter.format(Date(ms))
+}
+
+/** 指纹计算状态：0 未计算；-1 解码失败（跳过，不再重试）；>0 已计算。 */
+private fun signatureStatusOf(version: Int): String = when {
+    version > 0 -> "已计算（v$version）"
+    version < 0 -> "无法解码（解码失败，已跳过）"
+    else -> "未计算"
 }
 
 /** 64 位感知哈希转十六进制；未计算时显示"未计算"。 */

@@ -147,7 +147,8 @@ fun FilteredScreen(
                 } else {
                     scope.launch {
                         val ids = viewModel.filteredIds(filter)
-                        onOpenViewer(ids, ids.indexOf(item.id).coerceAtLeast(0))
+                        val index = ids.indexOf(item.id)
+                        if (index >= 0) onOpenViewer(ids, index) else onOpenViewer(listOf(item.id), 0)
                     }
                 }
             },
@@ -165,13 +166,20 @@ fun FilteredScreen(
                 viewModel.postMessage(text)
                 selectedIds = emptySet()
             },
+            onReport = { report ->
+                selectedIds = emptySet()
+                viewModel.publishReport(report)
+                viewModel.openScreen(AppScreen.Report(report))
+            },
         )
     }
 
     trashTargetIds?.let { ids ->
         ConfirmDialog(
             title = "移入回收站",
-            text = "将把 " + ids.size + " 张图片移入回收站，30 天内可随时恢复。",
+            text = "将把 " + ids.size + " 张图片移入回收站，" +
+                (if (settings.retention.days <= 0) "长期保留（不会自动清理），" else settings.retention.label + " 内可随时恢复，") +
+                "之后可一键恢复。",
             confirmText = "移入回收站",
             destructive = true,
             onDismiss = { trashTargetIds = null },

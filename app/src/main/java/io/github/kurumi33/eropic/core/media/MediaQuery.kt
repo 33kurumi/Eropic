@@ -33,12 +33,17 @@ object MediaQuery {
             sql.append(" AND (isFavorite = 1 OR localFavorite = 1)")
         }
         filter.folderPath?.let { path ->
-            if (filter.includeSubfolders) {
-                sql.append(" AND relativePath LIKE ? ESCAPE '\\'")
-                args += escapeLike(path.trimEnd('/')) + "/%"
-            } else {
-                sql.append(" AND relativePath = ?")
-                args += path
+            val trimmed = path.trimEnd('/')
+            // 根目录（path 为空）代表"全部照片"：不追加目录条件。
+            // 之前这里会拼出 LIKE '/%'，一条也匹配不到，导致根目录详情页空着。
+            if (trimmed.isNotEmpty()) {
+                if (filter.includeSubfolders) {
+                    sql.append(" AND relativePath LIKE ? ESCAPE '\\'")
+                    args += escapeLike(trimmed) + "/%"
+                } else {
+                    sql.append(" AND relativePath = ?")
+                    args += path
+                }
             }
         }
         sql.append(" ORDER BY ").append(sort.sql).append(", id DESC")

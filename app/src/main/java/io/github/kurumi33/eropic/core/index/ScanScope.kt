@@ -21,8 +21,9 @@ data class ScanScope(
         val args = ArrayList<String>(2 + excludedDirs.size * 2)
         if (base.isNotBlank()) clauses += base
         if (!includeHidden) {
-            // 形如 DCIM/.thumbnails/ 的隐藏目录；"%/.%" 只会命中"以点开头的路径段"
-            clauses += "IFNULL(${MediaStore.MediaColumns.RELATIVE_PATH}, '') NOT LIKE ? ESCAPE '\\'"
+            // 前面补 '/' 再匹配 "%/.%"，这样卷根下的 .thumbnails/ 这类顶层隐藏目录也能命中
+            //（只匹配 "%/.%" 会漏掉斜杠前没有字符的情况）。
+            clauses += "('/' || IFNULL(${MediaStore.MediaColumns.RELATIVE_PATH}, '')) NOT LIKE ? ESCAPE '\\'"
             args += "%/.%"
         }
         for (raw in excludedDirs) {

@@ -116,7 +116,8 @@ class OperationHistoryRepository(
                 failures = listOf(OpFailure("记录", "${titleOf(log.type)}不支持撤销")),
             )
         }
-        if (report.succeeded > 0) runCatching { logDao.markUndone(logId) }
+        // 只有"全部成功"才标记为已撤销：部分失败时若标记掉，剩下的文件就永远没有入口去救了。
+        if (report.succeeded > 0 && report.failed == 0) runCatching { logDao.markUndone(logId) }
         report
     }
 
@@ -216,8 +217,10 @@ class OperationHistoryRepository(
 
     private fun OperationLogEntity.toRecord(): OperationRecord {
         val items = OperationPayload.decode(payloadJson)
-        val undoable = !undone && type in UNDOABLE_TYPES && items.any { it.from != null || it.to != null || it.id > 0 }
         val legacy = OperationPayload.isLegacy(payloadJson)
+        // 老版本（v1 纯 id 数组）没有 from/to，搬不回去，不能显示成可撤销。
+        val undoable = !undone && !legacy && type in UNDOABLE_TYPES &&
+            items.any { it.from != null || it.to != null || it.id > 0 }
         return OperationRecord(
             id = id,
             type = type,

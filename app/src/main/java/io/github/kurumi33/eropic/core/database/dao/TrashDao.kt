@@ -39,6 +39,16 @@ interface TrashDao {
     @Query("SELECT COALESCE(SUM(sizeBytes), 0) FROM trash_item")
     suspend fun totalBytes(): Long
 
+    /**
+     * 按当前保留期重算所有已有条目的到期时间。
+     *
+     * 到期时间原本在"移入回收站"那一刻写死；用户事后把 30 天改成"永久保留"时，
+     * 旧条目仍会按旧日期被自动永久删除（真丢图），因此改档必须重算。
+     * [days] <= 0 表示永久保留，统一写成 [maxExpiry]（Long.MAX_VALUE）。
+     */
+    @Query("UPDATE trash_item SET expiresAtMs = CASE WHEN :days <= 0 THEN :maxExpiry ELSE trashedAtMs + :days * 86400000 END")
+    suspend fun remarkRetention(days: Int, maxExpiry: Long)
+
     /** 到期应清理（默认保留 30 天）。 */
     @Query("SELECT * FROM trash_item WHERE expiresAtMs <= :nowMs")
     suspend fun expiredBefore(nowMs: Long): List<TrashItemEntity>

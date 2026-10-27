@@ -1,14 +1,20 @@
 package io.github.kurumi33.eropic.core.media
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
+import androidx.room.withTransaction
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
 import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
 import io.github.kurumi33.eropic.core.index.ScanScope
 import io.github.kurumi33.eropic.core.model.FolderRow
+import io.github.kurumi33.eropic.core.model.MediaIdState
 import io.github.kurumi33.eropic.core.model.StatRow
 import io.github.kurumi33.eropic.core.query.SavedFilterCodec
 import io.github.kurumi33.eropic.core.query.MediaFilter
@@ -93,6 +99,10 @@ class MediaRepository(
         return next
     }
 
+    /** 统计这批 id 中有多少张是系统相册收藏（App 无法取消，只能提示用户去系统相册操作）。 */
+    suspend fun countSystemFavorites(ids: Collection<Long>): Int =
+        if (ids.isEmpty()) 0 else mediaDao.countSystemFavorites(ids.toList())
+
     suspend fun folderRows(): List<FolderRow> = mediaDao.folderRows()
 
     fun countFlow(): Flow<Long> = mediaDao.countFlow()
@@ -111,28 +121,101 @@ class MediaRepository(
     ): SyncResult =
         scanMutex.withLock {
             val existing = mediaDao.idStates().associateBy { it.id }
+            val previousPresent = runCatching { mediaDao.countPresent() }.getOrDefault(0)
             var scanned = 0
             var changed = 0
-            val seenIds = ArrayList<Long>(existing.size + 1024)
+            val seenIds = HashSet<Long>(existing.size + 1024)
             dataSource.queryImages(scope) { batch ->
-                val changedItems = batch.filter { existing[it.id]?.dateModifiedMs != it.dateModifiedMs }
-                if (changedItems.isNotEmpty()) {
-                    mediaDao.upsertAll(changedItems)
-                    changed += changedItems.size
+                val inserts = ArrayList<MediaEntity>(batch.size)
+                val updates = ArrayList<MediaEntity>(batch.size)
+                for (item in batch) {
+                    val old = existing[item.id]
+                    if (old == null) {
+                        inserts += item
+                    } else if (isStoreStateChanged(old, item)) {
+                        updates += item
+                    }
+                    seenIds += item.id
                 }
-                batch.forEach { seenIds += it.id }
+                if (inserts.isNotEmpty() || updates.isNotEmpty()) {
+                    // 单批一个事务：中途被取消时已落库的批次完整可见，不会出现"改了一半"的行；
+                    // 也不再用"先全库清在场、再逐恢复"的写法（进程被杀会把图库清空）。
+                    database.withTransaction {
+                        if (inserts.isNotEmpty()) mediaDao.upsertAll(inserts)
+                        // 老行只更新 MediaStore 侧字段，保留本地收藏与已算指纹（REPLACE 会全清）。
+                        updates.forEach { item ->
+                            mediaDao.updateStoreFields(
+                                id = item.id,
+                                displayName = item.displayName,
+                                path = item.path,
+                                relativePath = item.relativePath,
+                                bucketId = item.bucketId,
+                                bucketName = item.bucketName,
+                                sizeBytes = item.sizeBytes,
+                                mimeType = item.mimeType,
+                                width = item.width,
+                                height = item.height,
+                                dateTakenMs = item.dateTakenMs,
+                                dateModifiedMs = item.dateModifiedMs,
+                                dateAddedSecs = item.dateAddedSecs,
+                                orientation = item.orientation,
+                                isFavorite = item.isFavorite,
+                            )
+                        }
+                    }
+                    changed += inserts.size + updates.size
+                }
                 scanned += batch.size
                 onProgress(scanned, changed)
             }
-            // scanned == 0 有两种原因：真的没有图片，或权限被降级成"仅选中照片"。
-            // 后者若继续把全部旧行标记为缺席，会把已有索引整体清掉，因此这里选择保守跳过。
-            if (scanned > 0) {
-                // 统一在末尾做一次"缺席标记 + 批量恢复在场"，避免逐批 markPresent 的往返开销。
-                mediaDao.markAllAbsent()
-                seenIds.chunked(500).forEach { mediaDao.markPresent(it) }
+            // 缺席标记用差集：只把"这一轮没看到"的旧行标掉。这样即便中途被取消，
+            // 也只会留下部分旧行，而不是把整库清空。scanned == 0 时区分两种原因：
+            //  - 没有读取全部照片的权限（Android 14 仅选中部分照片）→ 绝不能清库；
+            //  - 有权限但确实一张都没有（用户清空了相册）→ 应该清空，否则图库留幽灵行。
+            val hasFullAccess = hasFullMediaAccess()
+            val dropRatio = if (previousPresent <= 0) 0.0 else scanned.toDouble() / previousPresent
+            val shouldMarkAbsent = hasFullAccess && when {
+                scanned == 0 -> true
+                // 数量骤降一半以上（例如 SD 卡只挂载了一部分卷）时不轻信结果。
+                dropRatio < 0.5 -> false
+                else -> true
             }
-            SyncResult(scanned = scanned, changed = changed, totalIndexed = mediaDao.countAll())
+            if (shouldMarkAbsent) {
+                val stale = existing.keys.filter { it !in seenIds }
+                database.withTransaction {
+                    stale.chunked(500).forEach { mediaDao.markAbsent(it) }
+                }
+            }
+            SyncResult(
+                scanned = scanned,
+                changed = changed,
+                totalIndexed = mediaDao.countPresent(),
+                markedAbsent = if (shouldMarkAbsent) existing.size - seenIds.size.coerceAtMost(existing.size) else 0,
+            )
         }
+
+    /** 与 MediaStore 有关、且需要写回索引的字段是否变了（收藏加星不改 mtime，也要算变化）。 */
+    private fun isStoreStateChanged(old: MediaIdState, item: MediaEntity): Boolean =
+        old.dateModifiedMs != item.dateModifiedMs ||
+            old.sizeBytes != item.sizeBytes ||
+            old.displayName != item.displayName ||
+            old.relativePath != item.relativePath ||
+            old.isFavorite != item.isFavorite
+
+    /**
+     * 是否拿到了"读取全部照片"的权限。
+     *
+     * Android 13+ 用 READ_MEDIA_IMAGES；Android 12 及以下只有 READ_EXTERNAL_STORAGE。
+     * 只有全量权限才允许把未看到的旧行标为缺席，否则部分授权会把索引清空。
+     */
+    private fun hasFullMediaAccess(): Boolean {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+    }
 
     suspend fun itemsNeedingSignature(limit: Int): List<MediaEntity> = mediaDao.itemsNeedingSignature(limit)
 
@@ -181,7 +264,7 @@ class MediaRepository(
 
     suspend fun exactCandidates() = mediaDao.exactCandidates()
 
-    suspend fun count(): Int = mediaDao.countAll()
+    suspend fun count(): Int = mediaDao.countPresent()
 
     suspend fun clear() {
         database.hashBandDao().clear()
@@ -224,7 +307,7 @@ class MediaRepository(
     suspend fun deleteSavedFilter(id: Long) = database.savedFilterDao().deleteById(id)
 
     suspend fun stats(): RepositoryStats {
-        val count = mediaDao.countAll()
+        val count = mediaDao.countPresent()
         return RepositoryStats(count)
     }
 }
@@ -233,6 +316,8 @@ data class SyncResult(
     val scanned: Int,
     val changed: Int,
     val totalIndexed: Int,
+    /** 本轮被判定为已不在 MediaStore 里的行数（缺席标记；权限不足或数量骤降时为 0）。 */
+    val markedAbsent: Int = 0,
 )
 
 data class RepositoryStats(val totalCount: Int)

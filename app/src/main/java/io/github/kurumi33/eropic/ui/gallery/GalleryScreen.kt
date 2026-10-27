@@ -84,6 +84,8 @@ fun GalleryScreen(
 
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val selectionActive = selectedIds.isNotEmpty()
+    // 切换"全部/收藏"会换掉整个数据集：不清空选择的话，批量移动/删除会作用到当前看不见的图片。
+    LaunchedEffect(favoritesOnly) { selectedIds = emptySet() }
     var sortMenuOpen by remember { mutableStateOf(false) }
     var moreMenuOpen by remember { mutableStateOf(false) }
     // 写操作的待确认目标：移动对话框 / 移入回收站二次确认共用同一份选中集合。
@@ -247,7 +249,10 @@ fun GalleryScreen(
                         } else {
                             scope.launch {
                                 val ids = viewModel.viewerIds()
-                                onOpenViewer(ids, ids.indexOf(item.id).coerceAtLeast(0))
+                                val index = ids.indexOf(item.id)
+                                // 列表可能刚被后台同步刷新过：找不到就退回"只看这一张"，
+                                // 不能 coerceAtLeast(0) 打开第一张（用户会以为点错了图）。
+                                if (index >= 0) onOpenViewer(ids, index) else onOpenViewer(listOf(item.id), 0)
                             }
                         }
                     },
@@ -272,9 +277,12 @@ fun GalleryScreen(
     trashTargetIds?.let { ids ->
         ConfirmDialog(
             title = "移入回收站",
-            text = "将把 " + ids.size + " 张图片移入回收站，30 天内可恢复，不会立即删除。",
+            text = "将把 " + ids.size + " 张图片移入回收站，" +
+                settings.retention.label + "内可恢复，不会立即删除。",
             confirmText = "移入回收站",
             onConfirm = {
+                // 先关掉确认框，避免连点两次并发执行两遍同一批删除。
+                trashTargetIds = null
                 scope.launch {
                     val result = viewModel.moveToTrash(ids)
                     viewModel.postMessage(result.message, undoTrashIds = result.trashIds)

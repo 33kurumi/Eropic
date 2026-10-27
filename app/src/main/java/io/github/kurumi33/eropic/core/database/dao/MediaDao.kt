@@ -19,11 +19,44 @@ interface MediaDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<MediaEntity>)
 
-    @Query("SELECT id, dateModifiedMs FROM media_item")
+    @Query("SELECT id, dateModifiedMs, displayName, relativePath, sizeBytes, isFavorite FROM media_item")
     suspend fun idStates(): List<MediaIdState>
 
     @Query("UPDATE media_item SET isPresent = 0")
     suspend fun markAllAbsent()
+
+    /** 只把指定 id 标为缺席（对账末尾用差集，避免"先全清再逐条恢复"被中断后库变空）。 */
+    @Query("UPDATE media_item SET isPresent = 0 WHERE id IN (:ids)")
+    suspend fun markAbsent(ids: List<Long>)
+
+    /**
+     * 只更新 MediaStore 侧的字段，保留 [MediaEntity.localFavorite] 与已算好的指纹。
+     * 用 REPLACE 整行插入会在"外部编辑导致 mtime 变化"时把本地收藏和 dHash/pHash 一起清掉。
+     */
+    @Query(
+        "UPDATE media_item SET displayName = :displayName, path = :path, relativePath = :relativePath, " +
+            "bucketId = :bucketId, bucketName = :bucketName, sizeBytes = :sizeBytes, mimeType = :mimeType, " +
+            "width = :width, height = :height, dateTakenMs = :dateTakenMs, dateModifiedMs = :dateModifiedMs, " +
+            "dateAddedSecs = :dateAddedSecs, orientation = :orientation, isFavorite = :isFavorite, isPresent = 1 " +
+            "WHERE id = :id"
+    )
+    suspend fun updateStoreFields(
+        id: Long,
+        displayName: String,
+        path: String,
+        relativePath: String,
+        bucketId: Long,
+        bucketName: String,
+        sizeBytes: Long,
+        mimeType: String,
+        width: Int,
+        height: Int,
+        dateTakenMs: Long,
+        dateModifiedMs: Long,
+        dateAddedSecs: Long,
+        orientation: Int,
+        isFavorite: Boolean,
+    )
 
     @Query("UPDATE media_item SET isPresent = 1 WHERE id IN (:ids)")
     suspend fun markPresent(ids: List<Long>)
@@ -46,6 +79,10 @@ interface MediaDao {
 
     @Query("SELECT * FROM media_item WHERE id = :id")
     suspend fun byId(id: Long): MediaEntity?
+
+    /** 这些 id 里有多少张是"系统相册收藏"（MediaStore 的 IS_FAVORITE，App 只能读不能改）。 */
+    @Query("SELECT COUNT(*) FROM media_item WHERE id IN (:ids) AND isFavorite = 1")
+    suspend fun countSystemFavorites(ids: List<Long>): Int
 
     @Query("UPDATE media_item SET localFavorite = :favorite WHERE id = :id")
     suspend fun setLocalFavorite(id: Long, favorite: Boolean)
@@ -96,6 +133,10 @@ interface MediaDao {
 
     @Query("SELECT COUNT(*) FROM media_item")
     suspend fun countAll(): Int
+
+    /** 在场条目数：图库/统计的口径（countAll 把已缺席的旧行也算进去了）。 */
+    @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1")
+    suspend fun countPresent(): Int
 
     /** 已算过指纹的数量：用于判断上次索引是否被中途打断（已算 > 0 且还有未算 = 被打断）。 */
     @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1 AND signatureVersion > 0")

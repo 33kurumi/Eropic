@@ -128,11 +128,14 @@ class ScreenshotDetectorTest {
         assertTrue(sql.contains("lower(mimeType) = 'image/png'"))
         assertTrue(sql.contains("lower(path) LIKE ?"))
         assertTrue(sql.contains("ESCAPE '\\'"))
-        assertTrue(sql.endsWith("ORDER BY dateTakenMs DESC, id DESC LIMIT ?"))
+        // 关键词命中的排前面，再按拍摄时间倒序；结尾仍然是 LIMIT。
+        assertTrue(sql.contains("ORDER BY CASE WHEN"))
+        assertTrue(sql.endsWith("dateTakenMs DESC, id DESC LIMIT ?"))
 
-        // 最后一个参数是 limit，其余全是 LIKE 模式。
+        // 最后一个参数是 limit；关键词表达式在 WHERE 与 ORDER BY 各出现一次，所以模式参数是偶数个。
         assertEquals(50, args.last())
         assertEquals(args.size - 1, args.count { it is String })
+        assertEquals(0, (args.size - 1) % 2)
         assertTrue(args.contains("%screenshot%"))
         // 下划线必须转义，否则 scr_ 会匹配到 screen_、script_ 等名字（粗筛面过大）。
         assertTrue(args.contains("%scr\\_%"))

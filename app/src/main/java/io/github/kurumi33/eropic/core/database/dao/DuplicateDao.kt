@@ -30,6 +30,30 @@ interface DuplicateDao {
     @Query("DELETE FROM duplicate_group WHERE kind = :kind")
     suspend fun clearGroupsOfKind(kind: String)
 
+    /**
+     * 文件被移入回收站或永久删除后，清掉它作为重复成员的归属行。
+     *
+     * 不清的话分组卡会一直显示"3 张 · 可释放 12MB"，实际组里只剩 2 张，
+     * 用户按提示移走的可能是想保留的那张。
+     */
+    @Query("DELETE FROM duplicate_member WHERE mediaId IN (:ids)")
+    suspend fun deleteMembersForMedia(ids: List<Long>)
+
+    /** 按剩余成员重算每组的张数与可释放字节（口径：保留体积最大的一张）。 */
+    @Query(
+        "UPDATE duplicate_group SET " +
+            "memberCount = (SELECT COUNT(*) FROM duplicate_member d WHERE d.groupId = duplicate_group.groupId), " +
+            "reclaimableBytes = COALESCE((SELECT SUM(m.sizeBytes) - MAX(m.sizeBytes) FROM duplicate_member d " +
+            "INNER JOIN media_item m ON m.id = d.mediaId WHERE d.groupId = duplicate_group.groupId), 0)",
+    )
+    suspend fun recomputeGroups()
+
+    @Query("DELETE FROM duplicate_member WHERE groupId IN (SELECT groupId FROM duplicate_group WHERE memberCount < 2)")
+    suspend fun deleteMembersOfIncompleteGroups()
+
+    @Query("DELETE FROM duplicate_group WHERE memberCount < 2")
+    suspend fun deleteIncompleteGroups()
+
     @Query("SELECT * FROM duplicate_group ORDER BY reclaimableBytes DESC")
     fun groupsFlow(): Flow<List<DuplicateGroupEntity>>
 

@@ -58,9 +58,17 @@ fun FoldersSection(
     hasWriteAccess: Boolean = false,
 ) {
     // 展开状态以 node.path 为 key；默认全部收起，点箭头才展开。
-    val expanded = remember { mutableStateMapOf<String, Boolean>() }
+    // 用可保存的 List<String> 而不是 mutableStateMapOf：后者旋转屏幕就全丢了。
+    var expandedPaths by rememberSaveable { mutableStateOf(listOf<String>()) }
+    val expanded = remember(expandedPaths) { expandedPaths.associateWith { true } }
     var selectedPath by rememberSaveable { mutableStateOf<String?>(null) }
-    val rows by produceState<List<FolderRow>>(initialValue = emptyList()) {
+    // 索引/后台同步完成后要重新查一次目录聚合，否则停在文件夹页时张数永远不更新。
+    val indexState by viewModel.indexState.collectAsStateWithLifecycle()
+    val rows by produceState(
+        initialValue = emptyList<FolderRow>(),
+        indexState.phase,
+        indexState.finishedAtMs,
+    ) {
         value = viewModel.loadFolderRows()
     }
     val tree = remember(rows) { FolderTreeBuilder.build(rows) }
@@ -85,7 +93,9 @@ fun FoldersSection(
             tree = tree,
             showMeta = settings.showMeta,
             expanded = expanded,
-            onToggleExpand = { path -> expanded[path] = !(expanded[path] ?: false) },
+            onToggleExpand = { path ->
+                expandedPaths = if (path in expandedPaths) expandedPaths - path else expandedPaths + path
+            },
             onOpenFolder = { path -> selectedPath = path },
         )
     }

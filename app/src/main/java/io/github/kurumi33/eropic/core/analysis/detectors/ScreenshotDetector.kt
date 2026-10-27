@@ -113,17 +113,24 @@ class ScreenshotDetector(private val dao: DetectionDao) {
          * 粗筛宁可多捞也不能漏，否则精筛再准也没用。
          */
         fun candidateQuery(limit: Int): Pair<String, List<Any>> {
-            val args = ArrayList<Any>(NAME_KEYWORDS.size + 1)
+            val keywordArgs = ArrayList<Any>(NAME_KEYWORDS.size)
             val clauses = StringBuilder()
             for (keyword in NAME_KEYWORDS) {
                 if (clauses.isNotEmpty()) clauses.append(" OR ")
                 clauses.append("lower(path) LIKE ?").append(LIKE_ESCAPE)
-                args += likePattern(keyword)
+                keywordArgs += likePattern(keyword)
             }
-            args += limit
+            val keywordExpr = clauses.toString()
+            // 文件名/路径命中关键词的排前面：截图基本都在 Screenshots 目录，
+            // 以前纯按拍摄时间倒序取 2000 条，库里 PNG 一多，更早的截图就永远进不了候选。
+            val args = ArrayList<Any>(keywordArgs.size * 2 + 1)
+            args.addAll(keywordArgs)
+            args.addAll(keywordArgs)
+            args.add(limit)
             val sql = "SELECT * FROM media_item WHERE isPresent = 1 " +
-                "AND (lower(mimeType) = 'image/png' OR (" + clauses + ")) " +
-                "ORDER BY dateTakenMs DESC, id DESC LIMIT ?"
+                "AND (lower(mimeType) = 'image/png' OR (" + keywordExpr + ")) " +
+                "ORDER BY CASE WHEN (" + keywordExpr + ") THEN 0 ELSE 1 END, " +
+                "dateTakenMs DESC, id DESC LIMIT ?"
             return sql to args
         }
 

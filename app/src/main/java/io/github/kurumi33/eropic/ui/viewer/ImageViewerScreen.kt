@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -30,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -111,18 +113,26 @@ fun ImageViewerScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     var slideshow by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    // M4：写操作（移入回收站）需要「所有文件访问」权限；没授权时菜单项置灰。
+    val hasWriteAccess = remember { viewModel.hasAllFilesAccess() }
+    var confirmTrash by remember { mutableStateOf(false) }
 
     LaunchedEffect(currentId) { favoriteOverride = null }
     LaunchedEffect(currentPage) { currentPageZoomed = false }
 
-    // 幻灯片：停在当前页等一个间隔，然后自动滑到下一页；到末尾自动停。
-    LaunchedEffect(slideshow, currentPage, mediaIds.size, settings.slideshowIntervalSec) {
+    // 幻灯片：一个协程循环翻页，到末尾自动停。
+    // 注意 key 里不能放 currentPage：翻页会重建这个 LaunchedEffect，正在跑的 animateScrollToPage
+    // 会被自己取消，结果停在两页之间。
+    LaunchedEffect(slideshow, mediaIds.size, settings.slideshowIntervalSec) {
         if (!slideshow) return@LaunchedEffect
-        delay(settings.slideshowIntervalSec * 1000L)
-        val next = currentPage + 1
-        if (next > mediaIds.lastIndex) {
-            slideshow = false
-        } else {
+        while (slideshow) {
+            delay(settings.slideshowIntervalSec * 1000L)
+            if (!slideshow) break
+            val next = pagerState.currentPage + 1
+            if (next > mediaIds.lastIndex) {
+                slideshow = false
+                break
+            }
             pagerState.animateScrollToPage(next)
         }
     }
@@ -134,7 +144,13 @@ fun ImageViewerScreen(
 
     val toggleFavorite: () -> Unit = {
         val id = currentId
-        if (id != null) {
+        // 系统相册里的收藏（IS_FAVORITE=1）App 改不了；硬翻 localFavorite 只会让心形看起来"取消不掉"。
+        val systemOnlyFavorite = currentEntity?.let { it.isFavorite && !it.localFavorite } == true
+        if (id == null) {
+            Unit
+        } else if (systemOnlyFavorite) {
+            Toast.makeText(context, "这是系统相册的收藏，请在系统相册里取消", Toast.LENGTH_SHORT).show()
+        } else {
             favoriteOverride = !isFavorite
             scope.launch {
                 runCatching { viewModel.toggleFavorite(id) }
@@ -294,6 +310,18 @@ fun ImageViewerScreen(
                                     copyPath()
                                 },
                             )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (hasWriteAccess) "移入回收站" else "移入回收站（需所有文件访问权限）",
+                                    )
+                                },
+                                enabled = hasWriteAccess,
+                                onClick = {
+                                    menuOpen = false
+                                    confirmTrash = true
+                                },
+                            )
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -325,6 +353,36 @@ fun ImageViewerScreen(
                 onTap = { headerVisible = !headerVisible },
             )
         }
+    }
+
+    // 删除确认：只移入回收站（默认保留 30 天），永不直接删除文件。
+    if (confirmTrash) {
+        AlertDialog(
+            onDismissRequest = { confirmTrash = false },
+            title = { Text("移入回收站") },
+            text = { Text("将把这张图片移入回收站，30 天内可随时恢复；不会直接从手机中删除。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmTrash = false
+                        val id = currentId ?: return@TextButton
+                        scope.launch {
+                            val result = runCatching { viewModel.moveToTrash(listOf(id)) }.getOrNull()
+                            if (result != null) {
+                                viewModel.postMessage(
+                                    text = result.message,
+                                    undoTrashIds = if (result.trashIds.isEmpty()) null else result.trashIds,
+                                )
+                            }
+                            onClose()
+                        }
+                    },
+                ) { Text("移入回收站") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmTrash = false }) { Text("取消") }
+            },
+        )
     }
 
     val detailsEntity = currentEntity

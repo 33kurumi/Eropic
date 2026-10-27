@@ -24,6 +24,9 @@ class DuplicateScanner(
 ) {
 
     suspend fun scanExact(): ExactScanResult = withContext(Dispatchers.IO) {
+        // 先删成员再删组：clearMembersOfKind 的子查询依赖 duplicate_group 行还存在，
+        // 顺序反了就会留下永远没人清理的孤儿成员行（表只增不减）。
+        duplicateDao.clearMembersOfKind(KIND_EXACT)
         duplicateDao.clearGroupsOfKind(KIND_EXACT)
         val bySize = mediaDao.exactCandidates().groupBy { it.sizeBytes }
         var groups = 0
@@ -66,6 +69,7 @@ class DuplicateScanner(
         dThreshold: Int = NearDuplicateGrouper.DEFAULT_DHASH_THRESHOLD,
         pThreshold: Int = NearDuplicateGrouper.DEFAULT_PHASH_THRESHOLD,
     ): NearScanResult = withContext(Dispatchers.IO) {
+        duplicateDao.clearMembersOfKind(KIND_NEAR)
         duplicateDao.clearGroupsOfKind(KIND_NEAR)
         val hashed = mediaDao.hashedItems()
         val items = hashed.map { HashItem(id = it.id, dhash = it.dhash ?: 0L, phash = it.phash ?: 0L) }

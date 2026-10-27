@@ -17,6 +17,7 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -61,8 +62,12 @@ fun FolderManagerScreen(
     viewModel: EropicViewModel,
     onBack: () -> Unit,
     onMessage: (String) -> Unit,
+    hasWriteAccess: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
+
+    // 系统返回键回设置页，不然会直接退出 App。
+    androidx.activity.compose.BackHandler(onBack = onBack)
 
     // null = 扫描中，空列表 = 确认没有空文件夹。refreshKey 变化时重新扫描。
     var refreshKey by remember { mutableIntStateOf(0) }
@@ -152,6 +157,24 @@ fun FolderManagerScreen(
                 .padding(horizontal = 16.dp, vertical = 4.dp),
         )
 
+        if (!hasWriteAccess) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                ),
+            ) {
+                Text(
+                    text = "未授予「所有文件访问」权限：新建与删除目录已禁用，请到「设置 → 存储权限」授权。",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        }
+
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -183,7 +206,7 @@ fun FolderManagerScreen(
                     )
                     Button(
                         onClick = { createFolder() },
-                        enabled = newPath.isNotBlank() && !busy,
+                        enabled = newPath.isNotBlank() && !busy && hasWriteAccess,
                     ) { Text("新建") }
                 }
             }
@@ -224,7 +247,7 @@ fun FolderManagerScreen(
         ) {
             Button(
                 onClick = { confirmDelete = true },
-                enabled = selectedPaths.isNotEmpty() && !busy,
+                enabled = selectedPaths.isNotEmpty() && !busy && hasWriteAccess,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error,
                     contentColor = MaterialTheme.colorScheme.onError,

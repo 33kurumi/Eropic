@@ -6,6 +6,7 @@ import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.media.MediaRepository
 import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 import io.github.kurumi33.eropic.core.thumb.ThumbnailCache
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -159,6 +160,10 @@ class IndexCoordinator(
                     skippedCount = skipped,
                     finishedAtMs = System.currentTimeMillis(),
                 )
+            } catch (e: CancellationException) {
+                // 用户点"取消"（或进程回收）时的正常退出：不能落成 ERROR，
+                // 否则 cancel() 刚写好的"已取消"会被覆盖掉。
+                throw e
             } catch (t: Throwable) {
                 _state.value = _state.value.copy(
                     phase = IndexPhase.ERROR,

@@ -108,6 +108,9 @@ fun CleanupScreen(
             filterState = applied,
             onBack = { filteredState = null },
             onOpenViewer = onOpenViewer,
+            // 筛选结果页同样要做写操作（移动/回收站/重命名/复制），必须把权限传下去，
+            // 否则已授权用户进到这里会发现四个按钮全是灰的。
+            hasWriteAccess = hasWriteAccess,
         )
         return
     }

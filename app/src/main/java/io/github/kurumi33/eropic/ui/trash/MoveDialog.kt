@@ -59,6 +59,8 @@ fun MoveDialog(
     mediaIds: List<Long>,
     onDismiss: () -> Unit,
     onMessage: (String) -> Unit,
+    /** 可选：把移动结果交给「操作结果」页展示失败明细（C-07）。 */
+    onReport: ((io.github.kurumi33.eropic.core.fileops.FileOpReport) -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
 
@@ -88,7 +90,21 @@ fun MoveDialog(
         busy = true
         scope.launch {
             try {
-                onMessage(viewModel.moveMedia(mediaIds, path).message)
+                val result = viewModel.moveMedia(mediaIds, path)
+                onMessage(result.message)
+                onReport?.invoke(
+                    io.github.kurumi33.eropic.core.fileops.FileOpReport(
+                        type = "MOVE",
+                        title = "移动图片",
+                        requested = mediaIds.size,
+                        succeeded = result.moved,
+                        failed = result.failed,
+                        cancelled = result.cancelled,
+                        bytes = result.bytes,
+                        failures = result.failures,
+                        logId = result.logId,
+                    ),
+                )
                 // 成功（含部分失败）都关闭对话框：失败明细在结果文案里。
                 onDismiss()
             } catch (t: Throwable) {
@@ -175,6 +191,8 @@ fun MoveDialog(
                         label = { Text("相对路径") },
                         placeholder = { Text("例如 Pictures/Travel") },
                         singleLine = true,
+                        // 批量移动进行中不许改路径：否则界面上的路径和实际执行的路径会不一致。
+                        enabled = !busy,
                         isError = problemText != null,
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     )

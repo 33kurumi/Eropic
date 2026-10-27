@@ -55,19 +55,23 @@ fun FolderDetailScreen(
     val scope = rememberCoroutineScope()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
-    // 根目录无法用 LIKE 匹配全库，聚合开关对它无意义。
-    val isRoot = folderPath.isEmpty()
+    // 根目录 = 全部照片（MediaQuery 对空 path 不加目录条件）。
     var includeSubfolders by rememberSaveable(folderPath) { mutableStateOf(false) }
-    val effectiveIncludeSubfolders = includeSubfolders && !isRoot
+    val effectiveIncludeSubfolders = includeSubfolders
 
     val items = remember(folderPath, effectiveIncludeSubfolders) {
         viewModel.folderMedia(folderPath, effectiveIncludeSubfolders)
     }.collectAsLazyPagingItems()
 
-    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var selectedIds by rememberSaveable(folderPath) { mutableStateOf<Set<Long>>(emptySet()) }
     val selectionActive = selectedIds.isNotEmpty()
     var moveTargetIds by remember { mutableStateOf<List<Long>?>(null) }
     var trashTargetIds by remember { mutableStateOf<List<Long>?>(null) }
+
+    // 返回键：多选态先退出多选，否则回目录树（以前会直接退出 App）。
+    androidx.activity.compose.BackHandler {
+        if (selectionActive) selectedIds = emptySet() else onBack()
+    }
 
     Column(Modifier.fillMaxSize()) {
         if (selectionActive) {
@@ -125,8 +129,13 @@ fun FolderDetailScreen(
 
         SubfolderModeBar(
             includeSubfolders = includeSubfolders,
-            enabled = !isRoot,
-            onToggle = { includeSubfolders = it },
+            enabled = true,
+            onToggle = { checked ->
+                includeSubfolders = checked
+                // 切换范围后屏幕上的照片集合会变，之前的选中项可能已经不可见，
+                // 不清空的话批量移动/回收站会作用到用户看不见的照片。
+                selectedIds = emptySet()
+            },
         )
 
         when {
@@ -168,7 +177,10 @@ fun FolderDetailScreen(
                         } else {
                             scope.launch {
                                 val ids = viewModel.folderIds(folderPath, effectiveIncludeSubfolders)
-                                onOpenViewer(ids, ids.indexOf(item.id).coerceAtLeast(0))
+                                val index = ids.indexOf(item.id)
+                                // 索引正好在变（后台同步/重新索引）时可能查不到这张图，
+                                // 以前会 coerce 成 0，结果打开的是另一张。
+                                if (index >= 0) onOpenViewer(ids, index) else onOpenViewer(listOf(item.id), 0)
                             }
                         }
                     },

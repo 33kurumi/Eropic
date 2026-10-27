@@ -31,9 +31,14 @@ class FolderOps(
             val dir = File(root, name)
             if (dir.isDirectory) walk(dir, found, 0)
         }
-        val topmost = found.sortedBy { it.length }.filter { path ->
-            found.none { other -> other != path && path.startsWith("$other/") }
-        }
+        val roots = ROOTS.map { File(root, it).absolutePath }.toSet()
+        val topmost = found
+            // 四个标准根目录自身永不列入（整棵为空时它们也在 found 里）
+            .filter { it !in roots }
+            .sortedBy { it.length }
+            .filter { path ->
+                found.none { other -> other != path && path.startsWith("$other/") }
+            }
         topmost.sorted().map { absolute ->
             EmptyFolderEntry(relativePath = relativeOf(absolute), absolutePath = absolute)
         }
@@ -88,7 +93,8 @@ class FolderOps(
                 failures += OpFailure(relativeOf(path), "目录已不存在")
                 continue
             }
-            if (!insideRoot(dir) || dir.absolutePath.contains(StoragePaths.TRASH_DIR_NAME)) {
+            val isStandardRoot = ROOTS.any { it == dir.name && dir.parentFile?.absolutePath == root.absolutePath }
+            if (!insideRoot(dir) || isStandardRoot || dir.absolutePath.contains(StoragePaths.TRASH_DIR_NAME)) {
                 failed++
                 failures += OpFailure(relativeOf(path), "不在可管理范围内")
                 continue
@@ -156,11 +162,21 @@ class FolderOps(
         return false
     }
 
+    /**
+     * 只删"完全为空"的目录，绝不删文件。
+     *
+     * 早先的实现对非目录子项直接 delete()，一旦 [hasAnyFile] 复查与真正删除之间
+     * 有别的 App（相机、截图、缩略图服务）往目录里写了文件，就会删掉用户文件。
+     * 现在遇到任何文件立即放弃（返回 false 并保留整个目录），最多留下几个空目录需要再点一次。
+     *
+     * 另一个坑：子目录递归删除成功后必须 continue，否则下面那行会用已经变成
+     * "不存在的文件" 的 child 去判断 isDirectory=false，误判为失败。
+     */
     private fun deleteRecursivelyEmpty(dir: File): Boolean {
-        val children = dir.listFiles().orEmpty()
+        val children = dir.listFiles() ?: return dir.delete()
         for (child in children) {
-            if (child.isDirectory && !deleteRecursivelyEmpty(child)) return false
-            if (!child.isDirectory && !child.delete()) return false
+            if (!child.isDirectory) return false // 有文件：立刻中止，不删任何东西
+            if (!deleteRecursivelyEmpty(child)) return false
         }
         return dir.delete()
     }

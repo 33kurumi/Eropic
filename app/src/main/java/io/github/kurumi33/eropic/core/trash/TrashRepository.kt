@@ -36,6 +36,16 @@ class TrashRepository(
 
     suspend fun count(): Int = trashDao.count()
 
+    /**
+     * 按用户当前的保留期重算已有条目的到期时间。
+     *
+     * 必须在"改保留期"和"启动时清理"两处调用：否则改成"永久保留"后旧条目仍会按旧日期被删。
+     */
+    suspend fun applyRetention(retentionDays: Int = RETENTION_DAYS) = withContext(Dispatchers.IO) {
+        runCatching { trashDao.remarkRetention(retentionDays, Long.MAX_VALUE) }
+        Unit
+    }
+
     suspend fun totalBytes(): Long = trashDao.totalBytes()
 
     /**
@@ -56,6 +66,8 @@ class TrashRepository(
         var failed = 0
         var bytes = 0L
         val newIds = mutableListOf<Long>()
+        // 真正从图库消失的 mediaId：用于事后重算重复分组统计。
+        val trashedMediaIds = mutableListOf<Long>()
         val oldPaths = mutableListOf<String>()
         val items = mutableListOf<OpItem>()
         val failures = mutableListOf<OpFailure>()
@@ -89,18 +101,28 @@ class TrashRepository(
                 failures += OpFailure(entity.displayName, "移动文件失败")
                 continue
             }
-            val trashId = trashDao.insert(
-                TrashItemEntity(
-                    mediaId = id,
-                    displayName = entity.displayName,
-                    trashPath = target.absolutePath,
-                    originalPath = entity.path,
-                    sizeBytes = entity.sizeBytes,
-                    mimeType = entity.mimeType,
-                    trashedAtMs = now,
-                    expiresAtMs = expiresAt,
-                ),
-            )
+            // 先移文件后写库：写库失败必须把文件搬回原处，否则文件留在隐藏的 .EropicTrash 里、
+            // 索引行也还在，用户视角就是"图片丢了、相册还显示但打不开"。
+            val trashId = runCatching {
+                trashDao.insert(
+                    TrashItemEntity(
+                        mediaId = id,
+                        displayName = entity.displayName,
+                        trashPath = target.absolutePath,
+                        originalPath = entity.path,
+                        sizeBytes = entity.sizeBytes,
+                        mimeType = entity.mimeType,
+                        trashedAtMs = now,
+                        expiresAtMs = expiresAt,
+                    ),
+                )
+            }.getOrNull()
+            if (trashId == null) {
+                runCatching { if (!source.exists()) target.renameTo(source) }
+                failed++
+                failures += OpFailure(entity.displayName, "写入回收站记录失败，已还原")
+                continue
+            }
             newIds += trashId
             oldPaths += entity.path
             items += OpItem(
@@ -110,12 +132,14 @@ class TrashRepository(
                 to = target.absolutePath,
             )
             mediaDao.deleteByIds(listOf(id))
+            trashedMediaIds += id
             trashed++
             bytes += entity.sizeBytes
         }
 
         // 让系统相册/MediaStore 感知"原路径已不存在"，避免残留缩略图或幽灵条目。
         MediaScanner.scan(context, oldPaths)
+        pruneDuplicateGroups(trashedMediaIds)
         log(
             type = "TRASH",
             summary = "移入回收站 $trashed 张" + if (failed > 0) "，$failed 张失败" else "",
@@ -179,18 +203,26 @@ class TrashRepository(
                 continue
             }
             val size = if (ref.sizeBytes > 0) ref.sizeBytes else target.length()
-            val trashId = trashDao.insert(
-                TrashItemEntity(
-                    mediaId = 0,
-                    displayName = ref.displayName,
-                    trashPath = target.absolutePath,
-                    originalPath = ref.path,
-                    sizeBytes = size,
-                    mimeType = ref.mimeType,
-                    trashedAtMs = now,
-                    expiresAtMs = expiresAt,
-                ),
-            )
+            val trashId = runCatching {
+                trashDao.insert(
+                    TrashItemEntity(
+                        mediaId = 0,
+                        displayName = ref.displayName,
+                        trashPath = target.absolutePath,
+                        originalPath = ref.path,
+                        sizeBytes = size,
+                        mimeType = ref.mimeType,
+                        trashedAtMs = now,
+                        expiresAtMs = expiresAt,
+                    ),
+                )
+            }.getOrNull()
+            if (trashId == null) {
+                runCatching { if (!source.exists()) target.renameTo(source) }
+                failed++
+                failures += OpFailure(ref.displayName, "写入回收站记录失败，已还原")
+                continue
+            }
             newIds += trashId
             oldPaths += ref.path
             items += OpItem(id = trashId, name = ref.displayName, from = ref.path, to = target.absolutePath)
@@ -224,8 +256,14 @@ class TrashRepository(
         val failures = mutableListOf<OpFailure>()
         for (row in trashDao.byIds(trashIds)) {
             val source = File(row.trashPath)
+            if (!volumeAvailable(row.trashPath)) {
+                // 卷没挂载（SD 卡拔出/U 盘断开）≠ 文件被删，必须保留记录，插回去还能恢复。
+                failed++
+                failures += OpFailure(row.displayName, "存储未挂载，暂不可恢复")
+                continue
+            }
             if (!source.exists()) {
-                // 文件已经不在了（外部删除），直接把记录清掉。
+                // 卷在但文件确实没了（外部删除），把失效记录清掉。
                 trashDao.deleteByIds(listOf(row.id))
                 failed++
                 failures += OpFailure(row.displayName, "回收站里的文件已不存在")
@@ -268,11 +306,20 @@ class TrashRepository(
 
     /** 永久删除（不可恢复）：只作用于回收站里的文件。 */
     suspend fun deletePermanently(trashIds: List<Long>): DeleteResult = withContext(Dispatchers.IO) {
+        if (trashIds.isEmpty()) {
+            // 空列表拼出 "IN ()" 会抛 SQLiteException，这里必须先挡住。
+            return@withContext DeleteResult(0, 0, 0L, "没有选中任何条目")
+        }
         var deleted = 0
         var failed = 0
         var bytes = 0L
         val failures = mutableListOf<OpFailure>()
         for (row in trashDao.byIds(trashIds)) {
+            if (!volumeAvailable(row.trashPath)) {
+                failed++
+                failures += OpFailure(row.displayName, "存储未挂载，暂不可删除")
+                continue
+            }
             val file = File(row.trashPath)
             val ok = !file.exists() || file.delete()
             if (ok) {
@@ -314,6 +361,8 @@ class TrashRepository(
         if (expired.isEmpty()) return@withContext 0
         var deleted = 0
         for (row in expired) {
+            // 卷没挂载时不能把记录删掉：文件还在卡里，删记录等于永久丢图。
+            if (!volumeAvailable(row.trashPath)) continue
             val file = File(row.trashPath)
             if (!file.exists() || file.delete()) {
                 trashDao.deleteByIds(listOf(row.id))
@@ -337,6 +386,12 @@ class TrashRepository(
     }
 
     // ---- 内部工具 ----
+
+    /** 文件所在卷是否可访问：父目录存在即视为已挂载（不依赖 StorageManager，避免额外权限）。 */
+    private fun volumeAvailable(path: String): Boolean {
+        val parent = File(path).parentFile ?: return false
+        return parent.exists() || parent.parentFile?.exists() == true
+    }
 
     private fun expiryOf(nowMs: Long, retentionDays: Int): Long =
         if (retentionDays <= 0) Long.MAX_VALUE else nowMs + retentionDays * 24L * 60L * 60L * 1000L
@@ -365,12 +420,34 @@ class TrashRepository(
             } else {
                 true
             }
-        }.getOrDefault(false)
+        }.getOrElse {
+            // 复制失败可能留下半截目标文件，必须清掉，否则回收站里多一个坏文件。
+            runCatching { target.delete() }
+            false
+        }
     }
 
     private fun ensureNoMedia(dir: File) {
         val nomedia = File(dir, ".nomedia")
         if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
+    }
+
+    /**
+     * 文件离开图库后重算重复分组。
+     *
+     * 只删 media_item 不碰 duplicate_member 的话，分组卡会长期显示虚高的「N 张 · 可释放 X」，
+     * 「选择保留」也会基于已经不存在的成员给建议。成员不足 2 个的组连成员行一起删。
+     * 这里纯属统计修正，失败不影响主流程（下次索引会重建）。
+     */
+    private suspend fun pruneDuplicateGroups(mediaIds: List<Long>) {
+        if (mediaIds.isEmpty()) return
+        runCatching {
+            val duplicateDao = database.duplicateDao()
+            duplicateDao.deleteMembersForMedia(mediaIds)
+            duplicateDao.recomputeGroups()
+            duplicateDao.deleteMembersOfIncompleteGroups()
+            duplicateDao.deleteIncompleteGroups()
+        }
     }
 
     private suspend fun log(type: String, summary: String, payloadJson: String) {
