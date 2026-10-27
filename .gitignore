@@ -31,3 +31,6 @@ google-services.json
 
 # Android Profiling
 *.hprof
+# 本机构建缓存（DSH 沙箱内使用，不提交）
+.gradle-home/
+.android-home/

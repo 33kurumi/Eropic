@@ -25,16 +25,16 @@
 
 ## 技术栈
 
-Kotlin · Jetpack Compose（Material 3）· Room · Paging 3 · Coil · WorkManager · Hilt · DataStore
+Kotlin 2.0 · Jetpack Compose（Material 3）· Room · Paging 3 · Coil 3 · WorkManager · DataStore；DI 用轻量 `AppContainer` 手写装配（ADR-0007）。
 数据来源：MediaStore 增量同步 + Room 可重建索引；去重：SHA-256 / dHash / pHash + 分桶倒排候选裁剪。
 **不申请网络权限**，无账号、无上传、无统计。
 
 ## 状态与计划
 
-- 当前：规划 v0.1（调研整合版）待评审；开发文档已就绪；**工程脚手架待建**
+- 当前：**M0 纵切已跑通** —— MediaStore 增量索引 → dHash/pHash 签名 → 精确/相似重复分组 → 图库与清理原型（只读，不做任何删除/移动）
 - 已确认：iQOO Neo8 / Android 15 / 120GB+ / 无 SD 卡；GitHub 开源 + 侧载，不上架；M0 只做图片；最低 Android 12；尽量兼容 ColorOS 等主流 ROM
 - 里程碑：M0 可行性原型 1~2 周 → M1 图库 MVP 3~4 周 → M2 清理核心 3 周 → M3 文件/回收站 2~3 周 → M4 打磨 2 周（合计约 11~14 周）
-- 下一步：按 [脚手架指南](docs/dev/01-脚手架搭建指南.md) 建工程并提交 → 开始 M0（MediaStore 索引 + 签名 + 重复分组原型 + 真机基准）
+- 下一步：真机跑 M0 基准（10 万张：扫描/解码/哈希耗时与内存）→ 补查看器/详情/筛选/排序/收藏 → M2 对比预览与移动/回收站
 
 ## License
 

@@ -345,7 +345,7 @@
 
 **推荐栈**：
 - 语言/UI：Kotlin 2.x + Jetpack Compose（Material 3）
-- 架构：单 Activity + Navigation Compose；MVVM + 单向数据流；Hilt 依赖注入
+- 架构：单 Activity + Navigation Compose；MVVM + 单向数据流；DI 用轻量 `AppContainer` 手写装配（ADR-0007），后续按需再评估 Hilt
 - 数据：Room（SQLite）+ Paging 3；DataStore（设置）
 - 图片：Coil 3（缩略图/大图/动图）+ 自定义磁盘缩略图缓存
 - 后台：WorkManager（扫描/哈希/缩略图/到期清理）
@@ -788,7 +788,7 @@ M3 阶段（M0 不做任何删除）在你的真机上分别验证两种方案�
 | M0 | 精确+近似分组原型 | 2 | 签名 | 输出重复组，抽样精度评估 |
 | M0 | 权限路线 A/B 验证（移动/回收站） | 2 | 骨架 | 两种方案的可行性结论 |
 | **M0 小计** | | **11** | | |
-| M1 | 模块化工程 + Hilt + Room 迁移 | 1.5 | M0 | 可编译的多模块项目 |
+| M1 | 模块化工程 + DI 评估（Hilt 或继续手写）+ Room 迁移 | 1.5 | M0 | 可编译的多模块项目 |
 | M1 | 扫描器 + 索引库 + 增量同步 | 3 | M0 | 索引状态页可用 |
 | M1 | 缩略图缓存（生成/淘汰/预热） | 2 | 扫描器 | 滚动流畅、缓存可清理 |
 | M1 | 时间线 + 日期分组 + Paging | 3 | 索引库 | 10 万张滚动 60fps |

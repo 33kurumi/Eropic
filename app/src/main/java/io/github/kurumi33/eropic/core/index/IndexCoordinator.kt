@@ -1,0 +1,153 @@
+package io.github.kurumi33.eropic.core.index
+
+import android.content.Context
+import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
+import io.github.kurumi33.eropic.core.database.EropicDatabase
+import io.github.kurumi33.eropic.core.media.MediaRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+enum class IndexPhase { IDLE, SYNCING, HASHING, DEDUPING, DONE, ERROR }
+
+data class IndexState(
+    val phase: IndexPhase = IndexPhase.IDLE,
+    val scanned: Int = 0,
+    val changed: Int = 0,
+    val signatureTotal: Int = 0,
+    val signatureDone: Int = 0,
+    val exactGroups: Int = 0,
+    val nearGroups: Int = 0,
+    val reclaimableBytes: Long = 0L,
+    val message: String = "",
+    val startedAtMs: Long = 0L,
+    val finishedAtMs: Long = 0L,
+) {
+    val isRunning: Boolean
+        get() = phase == IndexPhase.SYNCING || phase == IndexPhase.HASHING || phase == IndexPhase.DEDUPING
+}
+
+/** M0 的索引编排：扫描 → 指纹 → 重复分组。串行执行，状态可观察。 */
+class IndexCoordinator(
+    private val context: Context,
+    private val repository: MediaRepository,
+    private val signatureGenerator: SignatureGenerator,
+    private val duplicateScanner: DuplicateScanner,
+    database: EropicDatabase,
+) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val _state = MutableStateFlow(IndexState())
+    val state: StateFlow<IndexState> = _state.asStateFlow()
+    private var job: Job? = null
+
+    fun start() {
+        if (_state.value.isRunning) return
+        job = scope.launch {
+            val started = System.currentTimeMillis()
+            try {
+                _state.value = _state.value.copy(
+                    phase = IndexPhase.SYNCING,
+                    scanned = 0,
+                    changed = 0,
+                    message = "正在读取系统相册索引…",
+                    startedAtMs = started,
+                    finishedAtMs = 0L,
+                )
+                val sync = repository.syncFromMediaStore { scanned, changed ->
+                    _state.value = _state.value.copy(scanned = scanned, changed = changed)
+                }
+                _state.value = _state.value.copy(
+                    phase = IndexPhase.HASHING,
+                    scanned = sync.scanned,
+                    changed = sync.changed,
+                    signatureTotal = repository.countNeedingSignature(),
+                    signatureDone = 0,
+                    message = "正在计算指纹…",
+                )
+
+                var done = 0
+                var skipped = 0
+                while (true) {
+                    val batch = repository.itemsNeedingSignature(HASH_BATCH)
+                    if (batch.isEmpty()) break
+                    val failedIds = ArrayList<Long>()
+                    coroutineScope {
+                        batch.chunked(HASH_PARALLELISM).forEach { chunk ->
+                            val results = chunk.map { item ->
+                                async(Dispatchers.IO) {
+                                    val generated = runCatching { signatureGenerator.generate(item) }.getOrNull()
+                                    val ok = generated != null && runCatching {
+                                        repository.saveSignature(
+                                            id = item.id,
+                                            dhash = generated.dhash,
+                                            phash = generated.phash,
+                                            blurScore = generated.blurScore,
+                                            bands = generated.bands,
+                                        )
+                                    }.isSuccess
+                                    item.id to ok
+                                }
+                            }.awaitAll()
+                            results.filter { !it.second }.forEach { (id, _) -> failedIds += id }
+                        }
+                    }
+                    // 必须落一个终态，否则这些行下次仍被选出来，while(true) 永远出不去。
+                    if (failedIds.isNotEmpty()) {
+                        repository.markSignatureUnsupported(failedIds)
+                        skipped += failedIds.size
+                    }
+                    done += batch.size
+                    _state.value = _state.value.copy(signatureDone = done)
+                }
+
+                _state.value = _state.value.copy(
+                    phase = IndexPhase.DEDUPING,
+                    message = "正在查找精确重复…",
+                )
+                val exact = duplicateScanner.scanExact()
+                _state.value = _state.value.copy(
+                    exactGroups = exact.groups,
+                    message = "正在查找相似图片…",
+                )
+                val near = duplicateScanner.scanNear()
+                _state.value = _state.value.copy(
+                    phase = IndexPhase.DONE,
+                    exactGroups = exact.groups,
+                    nearGroups = near.groups,
+                    reclaimableBytes = exact.reclaimableBytes + near.reclaimableBytes,
+                    message = buildString {
+                        append("完成：精确重复 ${exact.groups} 组 · 相似 ${near.groups} 组")
+                        if (skipped > 0) append(" · 跳过 ${skipped} 张（无法解码）")
+                    },
+                    finishedAtMs = System.currentTimeMillis(),
+                )
+            } catch (t: Throwable) {
+                _state.value = _state.value.copy(
+                    phase = IndexPhase.ERROR,
+                    message = "出错：${t.message ?: t::class.java.simpleName}",
+                    finishedAtMs = System.currentTimeMillis(),
+                )
+            }
+        }
+    }
+
+    fun cancel() {
+        job?.cancel()
+        job = null
+        _state.value = _state.value.copy(phase = IndexPhase.IDLE, message = "已取消")
+    }
+
+    companion object {
+        private const val HASH_BATCH = 400
+        private const val HASH_PARALLELISM = 4
+    }
+}
