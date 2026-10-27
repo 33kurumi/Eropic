@@ -17,6 +17,7 @@ import androidx.room.PrimaryKey
         Index(value = ["dateTakenMs"]),
         Index(value = ["sizeBytes"]),
         Index(value = ["path"]),
+        Index(value = ["relativePath"]),
         Index(value = ["dhash"]),
         Index(value = ["sha256"]),
     ],
@@ -41,6 +42,8 @@ data class MediaEntity(
     val dateAddedSecs: Long,
     val orientation: Int,
     val isFavorite: Boolean,
+    /** App 内本地收藏（不写回 MediaStore，避免额外权限） */
+    val localFavorite: Boolean = false,
     /** MediaStore 中是否仍存在；扫描时先全部置 false，再逐批置回 true */
     val isPresent: Boolean = true,
     /** 感知哈希：9x8 dHash，64 bit */

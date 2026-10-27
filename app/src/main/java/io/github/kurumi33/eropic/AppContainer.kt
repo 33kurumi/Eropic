@@ -6,11 +6,13 @@ import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.index.IndexCoordinator
 import io.github.kurumi33.eropic.core.index.SignatureGenerator
 import io.github.kurumi33.eropic.core.media.MediaRepository
+import io.github.kurumi33.eropic.core.settings.SettingsRepository
 
 /** 手写依赖容器（M0 不引入 Hilt）。 */
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
     val database: EropicDatabase = EropicDatabase.build(appContext)
+    val settingsRepository: SettingsRepository = SettingsRepository(appContext)
     val mediaRepository: MediaRepository = MediaRepository(appContext, database)
     val signatureGenerator: SignatureGenerator = SignatureGenerator(appContext.contentResolver)
     val duplicateScanner: DuplicateScanner = DuplicateScanner(

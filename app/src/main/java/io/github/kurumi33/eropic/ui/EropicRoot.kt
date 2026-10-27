@@ -32,9 +32,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.ui.cleanup.CleanupScreen
-import io.github.kurumi33.eropic.ui.folders.FoldersScreen
+import io.github.kurumi33.eropic.ui.folders.FoldersSection
 import io.github.kurumi33.eropic.ui.gallery.GalleryScreen
+import io.github.kurumi33.eropic.ui.viewer.ImageViewerScreen
 import io.github.kurumi33.eropic.ui.permission.MediaAccess
 import io.github.kurumi33.eropic.ui.permission.MediaPermissions
 import io.github.kurumi33.eropic.ui.permission.PermissionScreen
@@ -77,6 +79,18 @@ fun EropicRoot(viewModel: EropicViewModel) {
         return
     }
 
+    // 大图查看器全屏覆盖在底部导航之上；目标状态放在 ViewModel，旋转不丢。
+    val viewerTarget by viewModel.viewerTarget.collectAsStateWithLifecycle()
+    viewerTarget?.let { target ->
+        ImageViewerScreen(
+            viewModel = viewModel,
+            mediaIds = target.ids,
+            startIndex = target.startIndex,
+            onClose = viewModel::closeViewer,
+        )
+        return
+    }
+
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
     val tabs = remember {
         listOf(
@@ -108,8 +122,12 @@ fun EropicRoot(viewModel: EropicViewModel) {
                     viewModel = viewModel,
                     access = access,
                     onRequestFullAccess = { launcher.launch(MediaPermissions.required()) },
+                    onOpenViewer = viewModel::openViewer,
                 )
-                1 -> FoldersScreen()
+                1 -> FoldersSection(
+                    viewModel = viewModel,
+                    onOpenViewer = viewModel::openViewer,
+                )
                 2 -> CleanupScreen(viewModel)
                 else -> SettingsScreen(viewModel)
             }

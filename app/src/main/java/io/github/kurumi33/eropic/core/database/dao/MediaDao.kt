@@ -5,7 +5,10 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.RawQuery
+import androidx.sqlite.db.SupportSQLiteQuery
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.model.FolderRow
 import io.github.kurumi33.eropic.core.model.MediaIdState
 import kotlinx.coroutines.flow.Flow
 
@@ -32,6 +35,22 @@ interface MediaDao {
 
     @Query("SELECT * FROM media_item WHERE isPresent = 1 ORDER BY dateTakenMs DESC")
     fun pagingSource(): PagingSource<Int, MediaEntity>
+
+    /** 运行时排序/筛选：SQL 由 [io.github.kurumi33.eropic.core.media.MediaQuery] 拼接。 */
+    @RawQuery(observedEntities = [MediaEntity::class])
+    fun pagingSourceRaw(query: SupportSQLiteQuery): PagingSource<Int, MediaEntity>
+
+    @RawQuery(observedEntities = [MediaEntity::class])
+    suspend fun idsRaw(query: SupportSQLiteQuery): List<Long>
+
+    @Query("SELECT * FROM media_item WHERE id = :id")
+    suspend fun byId(id: Long): MediaEntity?
+
+    @Query("UPDATE media_item SET localFavorite = :favorite WHERE id = :id")
+    suspend fun setLocalFavorite(id: Long, favorite: Boolean)
+
+    @Query("SELECT relativePath, COUNT(*) AS mediaCount, SUM(sizeBytes) AS totalBytes FROM media_item WHERE isPresent = 1 GROUP BY relativePath")
+    suspend fun folderRows(): List<FolderRow>
 
     @Query("SELECT * FROM media_item WHERE isPresent = 1 ORDER BY dateTakenMs DESC LIMIT :limit")
     fun recentFlow(limit: Int): Flow<List<MediaEntity>>

@@ -6,6 +6,7 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
+import io.github.kurumi33.eropic.core.model.FolderRow
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -21,15 +22,58 @@ class MediaRepository(
     private val dataSource = MediaStoreDataSource(context)
     private val scanMutex = Mutex()
 
-    fun pagingData(): Flow<PagingData<MediaEntity>> = Pager(
-        config = PagingConfig(
-            pageSize = 200,
-            initialLoadSize = 400,
-            prefetchDistance = 600,
-            enablePlaceholders = false,
-        ),
-        pagingSourceFactory = { mediaDao.pagingSource() },
+    private val pagingConfig = PagingConfig(
+        pageSize = 200,
+        initialLoadSize = 400,
+        prefetchDistance = 600,
+        enablePlaceholders = false,
+    )
+
+    /** 带排序/筛选/文件夹范围的分页流；sort 改变时由调用方重新订阅（VM 内部 flatMapLatest）。 */
+    fun pagingData(
+        sort: SortOrder = SortOrder.DATE_DESC,
+        favoritesOnly: Boolean = false,
+        folderPath: String? = null,
+        includeSubfolders: Boolean = true,
+    ): Flow<PagingData<MediaEntity>> = Pager(
+        config = pagingConfig,
+        pagingSourceFactory = {
+            val filter = MediaQueryFilter(
+                folderPath = folderPath,
+                includeSubfolders = includeSubfolders,
+                favoritesOnly = favoritesOnly,
+            )
+            mediaDao.pagingSourceRaw(MediaQuery.paging(filter, sort))
+        },
     ).flow
+
+    /** 给大图查看器用的有序 id 列表（与 pagingData 的排序/筛选保持一致）。 */
+    suspend fun ids(
+        sort: SortOrder = SortOrder.DATE_DESC,
+        favoritesOnly: Boolean = false,
+        folderPath: String? = null,
+        includeSubfolders: Boolean = true,
+    ): List<Long> = mediaDao.idsRaw(
+        MediaQuery.ids(
+            MediaQueryFilter(
+                folderPath = folderPath,
+                includeSubfolders = includeSubfolders,
+                favoritesOnly = favoritesOnly,
+            ),
+            sort,
+        )
+    )
+
+    suspend fun byId(id: Long): MediaEntity? = mediaDao.byId(id)
+
+    /** 切换本地收藏，返回切换后的状态。 */
+    suspend fun toggleLocalFavorite(id: Long): Boolean {
+        val next = !(mediaDao.byId(id)?.localFavorite ?: false)
+        mediaDao.setLocalFavorite(id, next)
+        return next
+    }
+
+    suspend fun folderRows(): List<FolderRow> = mediaDao.folderRows()
 
     fun countFlow(): Flow<Long> = mediaDao.countFlow()
 
