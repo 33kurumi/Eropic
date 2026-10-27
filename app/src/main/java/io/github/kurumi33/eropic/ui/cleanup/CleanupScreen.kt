@@ -56,6 +56,7 @@ import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.index.IndexState
 import io.github.kurumi33.eropic.core.media.MediaUris
+import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
@@ -63,7 +64,7 @@ import io.github.kurumi33.eropic.ui.common.formatMediaSubtitle
 import kotlinx.coroutines.launch
 import java.io.File
 
-/** 清理页的六个入口。前两个来自查重分组，后四个来自检测器。 */
+/** 清理页的八个入口。前两个来自查重分组，其余来自检测器。 */
 enum class CleanupCategory(val label: String) {
     DUPLICATES("重复"),
     SIMILAR("相似"),
@@ -71,6 +72,8 @@ enum class CleanupCategory(val label: String) {
     OLD("久远"),
     SCREENSHOT("截图"),
     BLURRY("模糊"),
+    BURST("连拍"),
+    SMALL("小图"),
 }
 
 /** 当前分类要展示的内容。 */
@@ -168,6 +171,24 @@ fun CleanupScreen(
                     items = viewModel.blurred(),
                     summary = "清晰度低于阈值（Laplacian 方差 < 100，已完成指纹计算）",
                 )
+
+                CleanupCategory.BURST -> {
+                    val result = viewModel.bursts()
+                    CleanupContent.Detected(
+                        items = result.groups.flatMap { it.members },
+                        summary = "疑似连拍：${result.groups.size} 组 · ${formatCount(result.hitCount.toLong())} 张 · " +
+                            "每组留一张可释放约 ${formatBytes(result.reclaimableBytes)}" +
+                            "（同目录、5 秒内、连续 3 张以上）",
+                    )
+                }
+
+                CleanupCategory.SMALL -> {
+                    val items = viewModel.smallImages()
+                    CleanupContent.Detected(
+                        items = items,
+                        summary = "小图：面积小于 200×200 的图片，共 ${formatCount(items.size.toLong())} 张",
+                    )
+                }
             }
         }.getOrElse { error ->
             CleanupContent.Detected(
@@ -181,6 +202,9 @@ fun CleanupScreen(
         TopAppBar(
             title = { Text("清理") },
             actions = {
+                TextButton(onClick = { viewModel.openScreen(AppScreen.CleanupReport) }) {
+                    Text("清理报告")
+                }
                 TextButton(onClick = { showFilter = true }) {
                     Text(if (filterState.isEmpty) "组合筛选" else "筛选 · 已设置")
                 }

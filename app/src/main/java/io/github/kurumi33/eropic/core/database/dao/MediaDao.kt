@@ -10,6 +10,7 @@ import androidx.sqlite.db.SupportSQLiteQuery
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.model.FolderRow
 import io.github.kurumi33.eropic.core.model.MediaIdState
+import io.github.kurumi33.eropic.core.model.StatRow
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -102,6 +103,47 @@ interface MediaDao {
 
     @Query("DELETE FROM media_item WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)
+
+    /** 重命名/复制后改写索引里的路径与文件名；extension 由调用方保证。 */
+    @Query("UPDATE media_item SET path = :path, displayName = :displayName, relativePath = :relativePath WHERE id = :id")
+    suspend fun updatePathAndName(id: Long, path: String, displayName: String, relativePath: String)
+
+    /** 所有出现过的目录（M2 组合筛选 / M4 搜索的目录选择器）。 */
+    @Query("SELECT DISTINCT relativePath FROM media_item WHERE isPresent = 1 ORDER BY relativePath COLLATE NOCASE")
+    suspend fun distinctFolders(): List<String>
+
+    /** 组合筛选的命中数与命中总量（B-10）；SQL 由 MediaFilterSql.toQuery 拼好。 */
+    @RawQuery
+    suspend fun countRaw(query: SupportSQLiteQuery): Long
+
+    @RawQuery
+    suspend fun sumSizeRaw(query: SupportSQLiteQuery): Long
+
+    /** 存储仪表盘：按格式聚合。 */
+    @Query(
+        "SELECT mimeType AS groupKey, COUNT(*) AS itemCount, COALESCE(SUM(sizeBytes), 0) AS totalBytes " +
+            "FROM media_item WHERE isPresent = 1 GROUP BY mimeType ORDER BY totalBytes DESC"
+    )
+    suspend fun statsByFormat(): List<StatRow>
+
+    /** 存储仪表盘：按年份聚合（dateTakenMs 缺失时扫描层已回退到修改时间）。 */
+    @Query(
+        "SELECT strftime('%Y', dateTakenMs / 1000, 'unixepoch', 'localtime') AS groupKey, " +
+            "COUNT(*) AS itemCount, COALESCE(SUM(sizeBytes), 0) AS totalBytes " +
+            "FROM media_item WHERE isPresent = 1 GROUP BY groupKey ORDER BY groupKey DESC"
+    )
+    suspend fun statsByYear(): List<StatRow>
+
+    /** 存储仪表盘：占用最大的目录。 */
+    @Query(
+        "SELECT relativePath AS groupKey, COUNT(*) AS itemCount, COALESCE(SUM(sizeBytes), 0) AS totalBytes " +
+            "FROM media_item WHERE isPresent = 1 GROUP BY relativePath ORDER BY totalBytes DESC LIMIT :limit"
+    )
+    suspend fun statsByFolder(limit: Int): List<StatRow>
+
+    /** 真实移动文件和索引里的旧路径都可能给到一个范围（用于"滑动窗口"式操作）。 */
+    @Query("SELECT id FROM media_item WHERE isPresent = 1 AND dateTakenMs >= :fromMs AND dateTakenMs < :toMs ORDER BY dateTakenMs ASC")
+    suspend fun idsInRange(fromMs: Long, toMs: Long): List<Long>
 
     /** 真实移动文件后立刻改写索引里的位置，避免界面还显示旧目录（随后同步会再校正 MediaStore 新 id）。 */
     @Query("UPDATE media_item SET path = :path, relativePath = :relativePath, bucketId = :bucketId, bucketName = :bucketName WHERE id = :id")

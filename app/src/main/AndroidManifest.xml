@@ -7,6 +7,8 @@
     <!-- Android 14+ 用户可能只授权部分照片，必须能感知这种状态 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 查看器里「设为壁纸」需要，属于普通权限，不弹窗、不需用户手动授权 -->
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
     <!-- M3 真实移动/回收站/永久删除需要"所有文件访问"。Eropic 只侧载分发、不上架 Play，
          因此不需要提交 ALL_FILES 使用申报（决策见 docs/dev/05 ADR-0012）。
          未授予时写操作入口全部禁用，只读功能不受影响。 -->

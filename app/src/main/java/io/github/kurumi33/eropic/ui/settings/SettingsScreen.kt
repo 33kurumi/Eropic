@@ -21,6 +21,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,7 +45,10 @@ import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.settings.AppSettings
+import io.github.kurumi33.eropic.core.settings.RetentionOption
+import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 import io.github.kurumi33.eropic.core.settings.ThemeMode
+import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
@@ -100,6 +104,14 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
             BackgroundCard(settings = settings, viewModel = viewModel)
 
+            GalleryViewCard(settings = settings, viewModel = viewModel)
+
+            CleanupSettingsCard(settings = settings, viewModel = viewModel)
+
+            ScanScopeCard(settings = settings, viewModel = viewModel)
+
+            MorePagesCard(viewModel = viewModel)
+
             StorageAccessCard(
                 hasWriteAccess = hasWriteAccess,
                 onRequestAccess = {
@@ -127,11 +139,12 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "M3 范围", style = MaterialTheme.typography.titleMedium)
+                    Text(text = "M4 范围", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "已实现：浏览/排序/收藏/查看器、文件夹树与聚合、缩略图磁盘缓存、自动同步、多选、" +
-                            "指纹与精确/相似重复分组、六类清理入口与组合筛选、对比预览、保留建议、" +
-                            "真实移动文件、回收站（30 天，可撤销/恢复/彻底删除）。",
+                        text = "已实现：浏览/排序/收藏/查看器/幻灯片、文件夹树与聚合、缩略图磁盘缓存、自动同步、多选、" +
+                            "指纹与精确/相似重复分组、八类清理入口与组合筛选、对比预览、保留建议、清理报告、" +
+                            "真实移动/复制/重命名文件、空文件夹管理、回收站（可配置保留期，可撤销/恢复/彻底删除）、" +
+                            "操作历史与撤销闭环、搜索与保存筛选、存储总览、崩溃日志。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -152,6 +165,9 @@ fun SettingsScreen(viewModel: EropicViewModel) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    OutlinedButton(onClick = { viewModel.openScreen(AppScreen.About) }) {
+                        Text("权限、数据与许可详情")
+                    }
                 }
             }
         }
@@ -379,5 +395,193 @@ private fun SettingSwitchRow(
             )
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/**
+ * 图库显示与查看器偏好（M4 · T3 的捏合列数、日期分组、幻灯片都由这里配置）。
+ */
+@Composable
+private fun GalleryViewCard(settings: AppSettings, viewModel: EropicViewModel) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(text = "图库与查看", style = MaterialTheme.typography.titleMedium)
+
+            SettingSwitchRow(
+                title = "按日期分组",
+                subtitle = "图库按拍摄月份插入分组标题；双指捏合仍可临时改列数。",
+                checked = settings.dateGrouping,
+                onCheckedChange = viewModel::setDateGrouping,
+            )
+
+            Text(text = "幻灯片间隔", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(2, 3, 5, 8).forEach { seconds ->
+                    FilterChip(
+                        selected = settings.slideshowIntervalSec == seconds,
+                        onClick = { viewModel.setSlideshowInterval(seconds) },
+                        label = { Text(seconds.toString() + " 秒") },
+                    )
+                }
+            }
+            Text(
+                text = "查看器里点「幻灯片」按此间隔自动翻页，点屏幕任意位置停止。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 清理与回收站策略：保留期、相似判定档位。
+ */
+@Composable
+private fun CleanupSettingsCard(settings: AppSettings, viewModel: EropicViewModel) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(text = "清理与回收站", style = MaterialTheme.typography.titleMedium)
+
+            Text(text = "回收站保留时长", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                RetentionOption.entries.forEach { option ->
+                    FilterChip(
+                        selected = settings.retention == option,
+                        onClick = { viewModel.setRetention(option) },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+            Text(
+                text = "到期后会提示你清理，不会静默删除；「永久保留」则一直留着直到你手动清空。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Text(text = "相似判定档位", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SimilarityLevel.entries.forEach { level ->
+                    FilterChip(
+                        selected = settings.similarity == level,
+                        onClick = { viewModel.setSimilarity(level) },
+                        label = { Text(level.label) },
+                    )
+                }
+            }
+            Text(
+                text = "档位越宽松，判为相似的阈值越低、误报越多；改完需重新扫描相似分组才生效。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 扫描范围：是否包含隐藏目录、排除哪些目录。改完在下次「增量扫描」生效。
+ */
+@Composable
+private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
+    var draft by remember { mutableStateOf("") }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(text = "扫描范围", style = MaterialTheme.typography.titleMedium)
+
+            SettingSwitchRow(
+                title = "包含隐藏目录",
+                subtitle = "以 . 开头的目录（如缓存、缩略图目录）默认不索引。打开后可能会看到大量废图。",
+                checked = settings.scanIncludeHidden,
+                onCheckedChange = viewModel::setScanIncludeHidden,
+            )
+
+            Text(text = "排除目录", style = MaterialTheme.typography.labelLarge)
+            if (settings.scanExcludedDirs.isEmpty()) {
+                Text(
+                    text = "没有排除目录。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                settings.scanExcludedDirs.forEach { dir ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(text = dir, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { viewModel.removeScanExcludedDir(dir) }) { Text("移除") }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("如 DCIM/Screenshots") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    enabled = draft.isNotBlank(),
+                    onClick = {
+                        viewModel.addScanExcludedDir(draft)
+                        draft = ""
+                    },
+                ) { Text("添加") }
+            }
+            Text(
+                text = "目录用相对路径（相对存储根）。改完在下次「增量扫描」生效，已索引的行不会自动移除。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 二级页面入口（底部栏放不下的页面）。
+ */
+@Composable
+private fun MorePagesCard(viewModel: EropicViewModel) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(text = "更多页面", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { viewModel.openScreen(AppScreen.Search) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("搜索") }
+                OutlinedButton(
+                    onClick = { viewModel.openScreen(AppScreen.Storage) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("存储总览") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { viewModel.openScreen(AppScreen.History) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("操作历史") }
+                OutlinedButton(
+                    onClick = { viewModel.openScreen(AppScreen.FolderManager) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("文件夹管理") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { viewModel.openScreen(AppScreen.CleanupReport) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("清理报告") }
+                OutlinedButton(
+                    onClick = { viewModel.openScreen(AppScreen.About) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("关于") }
+            }
+        }
     }
 }

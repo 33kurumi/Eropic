@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -30,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,11 +45,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.media.SortOrder
+import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
-import io.github.kurumi33.eropic.ui.components.MediaGrid
+import io.github.kurumi33.eropic.ui.components.GalleryGrid
 import io.github.kurumi33.eropic.ui.components.SelectionTopBar
 import io.github.kurumi33.eropic.ui.components.shareImages
 import io.github.kurumi33.eropic.ui.trash.MoveDialog
@@ -73,11 +76,16 @@ fun GalleryScreen(
     val favoritesOnly by viewModel.favoritesOnly.collectAsStateWithLifecycle()
     val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
 
-    val items = viewModel.media.collectAsLazyPagingItems()
+    // 图库网格用带日期分组标题的行数据；捏合改列数只覆盖本次浏览，不回写设置。
+    val rows = viewModel.galleryRows.collectAsLazyPagingItems()
+    var columnOverride by remember { mutableStateOf<Int?>(null) }
+    val columns = (columnOverride ?: settings.gridColumns).coerceIn(3, 8)
+    LaunchedEffect(settings.gridColumns) { columnOverride = null }
 
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val selectionActive = selectedIds.isNotEmpty()
     var sortMenuOpen by remember { mutableStateOf(false) }
+    var moreMenuOpen by remember { mutableStateOf(false) }
     // 写操作的待确认目标：移动对话框 / 移入回收站二次确认共用同一份选中集合。
     var moveTargetIds by remember { mutableStateOf<List<Long>?>(null) }
     var trashTargetIds by remember { mutableStateOf<List<Long>?>(null) }
@@ -151,6 +159,28 @@ fun GalleryScreen(
                             }
                         }
                     }
+                    Box {
+                        IconButton(onClick = { moreMenuOpen = true }) {
+                            Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "更多")
+                        }
+                        DropdownMenu(expanded = moreMenuOpen, onDismissRequest = { moreMenuOpen = false }) {
+                            listOf(
+                                "搜索图片" to AppScreen.Search,
+                                "存储总览" to AppScreen.Storage,
+                                "操作历史" to AppScreen.History,
+                                "文件夹管理" to AppScreen.FolderManager,
+                                "清理报告" to AppScreen.CleanupReport,
+                            ).forEach { (label, screen) ->
+                                DropdownMenuItem(
+                                    text = { Text(label) },
+                                    onClick = {
+                                        moreMenuOpen = false
+                                        viewModel.openScreen(screen)
+                                    },
+                                )
+                            }
+                        }
+                    }
                 },
             )
         }
@@ -180,7 +210,7 @@ fun GalleryScreen(
         IndexBanner(indexState = indexState, onRetry = viewModel::startIndex)
 
         when {
-            indexState.phase == IndexPhase.SYNCING && items.itemCount == 0 -> {
+            indexState.phase == IndexPhase.SYNCING && rows.itemCount == 0 -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
@@ -190,7 +220,7 @@ fun GalleryScreen(
                 }
             }
 
-            items.itemCount == 0 -> {
+            rows.itemCount == 0 -> {
                 EmptyGallery(
                     phase = indexState.phase,
                     favoritesOnly = favoritesOnly,
@@ -199,13 +229,14 @@ fun GalleryScreen(
             }
 
             else -> {
-                MediaGrid(
-                    items = items,
-                    columns = settings.gridColumns,
+                GalleryGrid(
+                    rows = rows,
+                    columns = columns,
                     thumbnailsEnabled = settings.thumbnailCacheEnabled,
                     selectedIds = selectedIds,
                     selectionActive = selectionActive,
                     thumbnailProvider = { item -> viewModel.thumbnailFile(item) },
+                    onColumnsChange = { columnOverride = it },
                     onClick = { item ->
                         if (selectionActive) {
                             selectedIds = if (item.id in selectedIds) {

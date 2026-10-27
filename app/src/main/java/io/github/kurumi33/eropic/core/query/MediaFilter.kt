@@ -37,6 +37,8 @@ data class MediaFilter(
     /** 清晰度区间，列 blurScore（拉普拉斯方差，越大越清晰）；null 表示未计算，不会被区间命中。 */
     val minBlurScore: Float? = null,
     val maxBlurScore: Float? = null,
+    /** 文件名 / 目录模糊搜索（对应规划 A-11），不区分大小写，% 与 _ 会转义。 */
+    val nameLike: String? = null,
 ) {
 
     /** 没有任何生效条件；UI 用它决定是否显示"已筛选"角标、是否显示"清空筛选"。 */
@@ -53,7 +55,8 @@ data class MediaFilter(
             !favoritesOnly &&
             folders.isEmpty() &&
             minBlurScore == null &&
-            maxBlurScore == null
+            maxBlurScore == null &&
+            nameLike.isNullOrBlank()
 }
 
 /**
@@ -72,7 +75,7 @@ object MediaFilterSql {
      * 返回 [条件片段, 绑定参数]：片段之间用 AND 连接、不含 WHERE 关键字，空条件返回 ""。
      *
      * 调用方负责带上 `isPresent = 1`（见 [toQuery]）；条件顺序固定为
-     * 大小 → 分辨率 → 格式 → 拍摄时间 → 修改时间 → 收藏 → 目录 → 清晰度，
+     * 大小 → 分辨率 → 格式 → 拍摄时间 → 修改时间 → 收藏 → 目录 → 清晰度 → 文件名，
      * 参数顺序与片段顺序一一对应，改顺序时务必同步单测。
      */
     fun where(filter: MediaFilter): Pair<String, List<Any>> {
@@ -147,6 +150,13 @@ object MediaFilterSql {
         filter.maxBlurScore?.let {
             clauses += "blurScore <= ?"
             args += it
+        }
+        filter.nameLike?.takeIf { it.isNotBlank() }?.let { raw ->
+            // 文件名与目录都参与匹配：用户往往记得"在哪个文件夹"而不记得文件名本身
+            val pattern = "%" + escapeLike(raw.trim()) + "%"
+            clauses += "(displayName LIKE ?" + LIKE_ESCAPE + " OR relativePath LIKE ?" + LIKE_ESCAPE + ")"
+            args += pattern
+            args += pattern
         }
         return clauses.joinToString(" AND ") to args
     }

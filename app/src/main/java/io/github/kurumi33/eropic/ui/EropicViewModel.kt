@@ -7,28 +7,45 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
+import androidx.paging.insertSeparators
+import androidx.paging.map
 import io.github.kurumi33.eropic.AppContainer
+import io.github.kurumi33.eropic.core.analysis.detectors.BurstResult
+import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileResult
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
 import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
+import io.github.kurumi33.eropic.core.fileops.BatchState
+import io.github.kurumi33.eropic.core.fileops.EmptyFolderEntry
+import io.github.kurumi33.eropic.core.fileops.FileOpReport
 import io.github.kurumi33.eropic.core.fileops.MoveResult
+import io.github.kurumi33.eropic.core.fileops.OperationRecord
+import io.github.kurumi33.eropic.core.fileops.RenamePreview
 import io.github.kurumi33.eropic.core.index.IndexState
+import io.github.kurumi33.eropic.core.log.CrashLogger
+import io.github.kurumi33.eropic.core.media.SortOrder
+import io.github.kurumi33.eropic.core.model.FolderRow
+import io.github.kurumi33.eropic.core.model.StatRow
 import io.github.kurumi33.eropic.core.permissions.StorageAccess
+import io.github.kurumi33.eropic.core.query.MediaFilter
+import io.github.kurumi33.eropic.core.settings.AppSettings
+import io.github.kurumi33.eropic.core.settings.RetentionOption
+import io.github.kurumi33.eropic.core.settings.SimilarityLevel
+import io.github.kurumi33.eropic.core.settings.ThemeMode
 import io.github.kurumi33.eropic.core.trash.DeleteResult
 import io.github.kurumi33.eropic.core.trash.RestoreResult
 import io.github.kurumi33.eropic.core.trash.TrashResult
-import io.github.kurumi33.eropic.core.media.SortOrder
-import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileResult
-import io.github.kurumi33.eropic.core.model.FolderRow
-import io.github.kurumi33.eropic.core.query.MediaFilter
-import io.github.kurumi33.eropic.core.settings.AppSettings
-import io.github.kurumi33.eropic.core.settings.ThemeMode
+import io.github.kurumi33.eropic.ui.gallery.GalleryDates
+import io.github.kurumi33.eropic.ui.gallery.GalleryRow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -49,11 +66,21 @@ data class UiMessage(
     val undoTrashIds: List<Long>? = null,
 )
 
+/** 存储仪表盘的聚合快照（M4）。 */
+data class StorageOverview(
+    val totalCount: Long = 0,
+    val totalBytes: Long = 0,
+    val formats: List<StatRow> = emptyList(),
+    val years: List<StatRow> = emptyList(),
+    val folders: List<StatRow> = emptyList(),
+)
+
 class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     private val repository = container.mediaRepository
     private val duplicateDao = container.database.duplicateDao()
     private val settingsRepository = container.settingsRepository
+    private val trashRepository = container.trashRepository
 
     // ---- 设置 ----
 
@@ -90,6 +117,30 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         _favoritesOnly.value = !_favoritesOnly.value
     }
 
+    // ---- M4 新增设置 ----
+
+    fun setDateGrouping(enabled: Boolean) = viewModelScope.launch { settingsRepository.setDateGrouping(enabled) }
+
+    fun setSlideshowInterval(seconds: Int) =
+        viewModelScope.launch { settingsRepository.setSlideshowInterval(seconds) }
+
+    fun setRetention(option: RetentionOption) = viewModelScope.launch {
+        settingsRepository.setRetention(option)
+        // 保留期调小后立即跑一次过期清理，让新策略马上生效。
+        container.requestTrashCleanup()
+    }
+
+    fun setSimilarity(level: SimilarityLevel) = viewModelScope.launch { settingsRepository.setSimilarity(level) }
+
+    fun setScanIncludeHidden(enabled: Boolean) =
+        viewModelScope.launch { settingsRepository.setScanIncludeHidden(enabled) }
+
+    fun addScanExcludedDir(raw: String) = viewModelScope.launch { settingsRepository.addScanExcludedDir(raw) }
+
+    fun removeScanExcludedDir(dir: String) = viewModelScope.launch { settingsRepository.removeScanExcludedDir(dir) }
+
+    fun clearScanExcludedDirs() = viewModelScope.launch { settingsRepository.clearScanExcludedDirs() }
+
     // ---- 图库 ----
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -98,6 +149,44 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
             repository.pagingData(sort = sort, favoritesOnly = favoritesOnly)
         }
     }.cachedIn(viewModelScope)
+
+    /**
+     * 图库网格数据：与 [media] 同源，但在开启「按日期分组」且按时间排序时，
+     * 会在每个月份的第一张照片前插入一个分组标题行。
+     *
+     * 注意：insertSeparators 的分隔项必须和条目同类型，所以这里先 map 成 [GalleryRow]，
+     * 再用 GalleryRow.Header 作为分隔项，网格里按类型分支即可。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val galleryRows: Flow<PagingData<GalleryRow>> = combine(sortOrder, settings) { sort, current ->
+        sort to current.dateGrouping
+    }
+        .distinctUntilChanged()
+        .flatMapLatest { (sort, grouping) ->
+            _favoritesOnly.flatMapLatest { favoritesOnly ->
+                repository.pagingData(sort = sort, favoritesOnly = favoritesOnly).map { paging ->
+                    val photos: PagingData<GalleryRow> = paging.map { GalleryRow.Photo(it) }
+                    val byDate = sort == SortOrder.DATE_DESC || sort == SortOrder.DATE_ASC
+                    if (!grouping || !byDate) {
+                        photos
+                    } else {
+                        photos.insertSeparators { before, after ->
+                            val next = after as? GalleryRow.Photo ?: return@insertSeparators null
+                            val previous = before as? GalleryRow.Photo
+                            val nextKey = GalleryDates.monthKey(next.entity.dateTakenMs)
+                            if (previous == null ||
+                                GalleryDates.monthKey(previous.entity.dateTakenMs) != nextKey
+                            ) {
+                                GalleryRow.Header(nextKey, GalleryDates.monthLabel(next.entity.dateTakenMs))
+                            } else {
+                                null
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .cachedIn(viewModelScope)
 
     val count: StateFlow<Long> = repository.countFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
@@ -155,14 +244,20 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     suspend fun members(groupId: Long): List<MediaEntity> = duplicateDao.members(groupId)
 
-    fun startIndex() = container.indexCoordinator.start()
+    fun startIndex() = container.indexCoordinator.start(
+        similarity = settings.value.similarity,
+        scope = settings.value.scanScope(),
+    )
 
     fun cancelIndex() = container.indexCoordinator.cancel()
 
     fun rebuildIndex() {
         viewModelScope.launch {
             repository.clear()
-            container.indexCoordinator.start()
+            container.indexCoordinator.start(
+                similarity = settings.value.similarity,
+                scope = settings.value.scanScope(),
+            )
         }
     }
 
@@ -177,10 +272,58 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     suspend fun blurred(): List<MediaEntity> = container.blurDetector.find()
 
+    /** 连拍候选：5 秒内同目录 >=3 张；结果里也带可释放字节。 */
+    suspend fun bursts(): BurstResult = container.burstDetector.find()
+
+    /** 小图候选：小于 200x200。 */
+    suspend fun smallImages(): List<MediaEntity> = container.smallImageDetector.find()
+
     fun filteredMedia(filter: MediaFilter): Flow<PagingData<MediaEntity>> =
         repository.pagingData(filter, sortOrder.value)
 
     suspend fun filteredIds(filter: MediaFilter): List<Long> = repository.ids(filter, sortOrder.value)
+
+    /** M4 B-10：当前筛选命中的张数与总大小。 */
+    suspend fun filterCount(filter: MediaFilter): Long = repository.count(filter)
+
+    suspend fun filterSumSize(filter: MediaFilter): Long = repository.sumSize(filter)
+
+    /** M4 A-11：按文件名/目录模糊搜索（复用组合筛选的 nameLike）。 */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun searchMedia(query: String): Flow<PagingData<MediaEntity>> =
+        sortOrder.flatMapLatest { sort ->
+            repository.pagingData(MediaFilter(nameLike = query), sort)
+        }.cachedIn(viewModelScope)
+
+    suspend fun searchIds(query: String): List<Long> =
+        repository.ids(MediaFilter(nameLike = query), sortOrder.value)
+
+    suspend fun distinctFolders(): List<String> = repository.distinctFolders()
+
+    // ---- M4 保存的筛选条件（B-17） ----
+
+    val savedFilters: StateFlow<List<SavedFilterEntity>> = repository.savedFilters()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    suspend fun saveFilter(name: String, filter: MediaFilter): Long = repository.saveFilter(name, filter)
+
+    suspend fun deleteSavedFilter(id: Long) = repository.deleteSavedFilter(id)
+
+    // ---- M4 存储仪表盘（E-04） ----
+
+    /** 一次取齐存储仪表盘需要的聚合数据（按格式/年份/目录）。 */
+    suspend fun storageOverview(): StorageOverview {
+        val formats = repository.statsByFormat()
+        val years = repository.statsByYear()
+        val folders = repository.statsByFolder()
+        return StorageOverview(
+            totalCount = repository.count().toLong(),
+            totalBytes = formats.sumOf { it.totalBytes },
+            formats = formats,
+            years = years,
+            folders = folders,
+        )
+    }
 
     // ---- 缩略图缓存 ----
 
@@ -220,9 +363,7 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     suspend fun setFavorites(ids: Collection<Long>, favorite: Boolean) =
         repository.setLocalFavorites(ids, favorite)
 
-    // ---- M3 回收站（删除先移入回收目录，默认保留 30 天，可一键恢复） ----
-
-    private val trashRepository = container.trashRepository
+    // ---- M3 回收站（删除先移入回收目录，保留期可配，可一键恢复） ----
 
     val trashItems: StateFlow<List<TrashItemEntity>> = trashRepository.items
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -233,8 +374,9 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     val trashTotalBytes: StateFlow<Long> = trashRepository.totalBytesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
 
-    /** 移入回收站（同卷 rename，瞬时完成；不是删除）。 */
-    suspend fun moveToTrash(ids: List<Long>): TrashResult = trashRepository.moveToTrash(ids)
+    /** 移入回收站（同卷 rename，瞬时完成；不是删除）。保留期跟随设置。 */
+    suspend fun moveToTrash(ids: List<Long>): TrashResult =
+        trashRepository.moveToTrash(ids, settings.value.retention.days)
 
     suspend fun restoreFromTrash(ids: List<Long>): RestoreResult = trashRepository.restore(ids)
 
@@ -248,14 +390,84 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     suspend fun moveTargetFolders(): List<String> = container.moveRepository.targetFolders()
 
     suspend fun moveMedia(ids: List<Long>, targetRelativePath: String): MoveResult =
-        container.moveRepository.moveTo(ids, targetRelativePath)
+        container.moveRepository.moveTo(ids, targetRelativePath, container.batchController)
+
+    // ---- M4 复制 / 重命名 / 文件夹 ----
+
+    suspend fun copyTargetFolders(): List<String> = container.copyRepository.targetFolders()
+
+    suspend fun copyMedia(ids: List<Long>, targetRelativePath: String): FileOpReport =
+        container.copyRepository.copyTo(ids, targetRelativePath, container.batchController)
+
+    /** 单张重命名。 */
+    suspend fun renameMedia(id: Long, newName: String): FileOpReport =
+        container.renameRepository.rename(id, newName)
+
+    /** 批量重命名预览（不落盘，仅算新名字与冲突）。 */
+    suspend fun renamePreview(ids: List<Long>, template: String): List<RenamePreview> {
+        val items = repository.byIds(ids)
+        return container.renameRepository.preview(items, template)
+    }
+
+    suspend fun renameBatch(ids: List<Long>, template: String): FileOpReport =
+        container.renameRepository.renameBatch(ids, template, container.batchController)
+
+    suspend fun emptyFolders(): List<EmptyFolderEntry> = container.folderOps.listEmptyFolders()
+
+    suspend fun createFolder(relativePath: String): FileOpReport = container.folderOps.createFolder(relativePath)
+
+    suspend fun deleteEmptyFolders(paths: List<String>): FileOpReport =
+        container.folderOps.deleteEmptyFolders(paths)
+
+    // ---- M4 批量任务控制（C-06） ----
+
+    val batchState: StateFlow<BatchState> = container.batchController.state
+
+    fun pauseBatch() = container.batchController.pause()
+
+    fun resumeBatch() = container.batchController.resume()
+
+    fun cancelBatch() = container.batchController.cancel()
+
+    // ---- M4 操作历史与撤销（C-07 / C-08） ----
+
+    val operationRecords: StateFlow<List<OperationRecord>> = container.operationHistoryRepository.records
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 撤销一条可撤销的操作（移动/重命名/复制/移入回收站）。 */
+    suspend fun undoOperation(logId: Long): FileOpReport =
+        container.operationHistoryRepository.undo(logId, settings.value.retention.days)
+
+    private val _lastReport = MutableStateFlow<FileOpReport?>(null)
+
+    /** 最近一次写操作结果：写完后跳报告页用。 */
+    val lastReport: StateFlow<FileOpReport?> = _lastReport
+
+    fun publishReport(report: FileOpReport) {
+        _lastReport.value = report
+    }
+
+    fun clearReport() {
+        _lastReport.value = null
+    }
+
+    // ---- M4 二级页面导航 ----
+
+    private val _screen = MutableStateFlow<AppScreen?>(null)
+    val screen: StateFlow<AppScreen?> = _screen
+
+    fun openScreen(screen: AppScreen) {
+        _screen.value = screen
+    }
+
+    fun closeScreen() {
+        _screen.value = null
+    }
 
     // ---- 一次性提示（Snackbar + 撤销） ----
 
-    private val _messages = kotlinx.coroutines.flow.MutableSharedFlow<UiMessage>(
-        extraBufferCapacity = 8,
-    )
-    val messages: kotlinx.coroutines.flow.SharedFlow<UiMessage> = _messages
+    private val _messages = MutableSharedFlow<UiMessage>(extraBufferCapacity = 8)
+    val messages: MutableSharedFlow<UiMessage> = _messages
 
     fun postMessage(text: String, undoTrashIds: List<Long>? = null) {
         _messages.tryEmit(UiMessage(text, undoTrashIds))
@@ -280,6 +492,12 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     fun setAutoResumeIndex(enabled: Boolean) {
         viewModelScope.launch { settingsRepository.setAutoResumeIndex(enabled) }
     }
+
+    // ---- 崩溃日志（关于页） ----
+
+    fun latestCrashLog(): String? = CrashLogger.latest(container.appContext)
+
+    fun clearCrashLogs() = CrashLogger.clear(container.appContext)
 
     companion object {
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {

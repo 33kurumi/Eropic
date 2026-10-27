@@ -89,6 +89,8 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
     implementation(libs.kotlinx.coroutines.android)
+    // M4：读取原始 EXIF（查看器详情页）
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

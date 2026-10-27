@@ -6,7 +6,11 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
+import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
+import io.github.kurumi33.eropic.core.index.ScanScope
 import io.github.kurumi33.eropic.core.model.FolderRow
+import io.github.kurumi33.eropic.core.model.StatRow
+import io.github.kurumi33.eropic.core.query.SavedFilterCodec
 import io.github.kurumi33.eropic.core.query.MediaFilter
 import io.github.kurumi33.eropic.core.query.MediaFilterSql
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
@@ -95,14 +99,22 @@ class MediaRepository(
 
     fun totalSizeFlow(): Flow<Long> = mediaDao.totalSizeFlow()
 
-    /** 用 MediaStore 做一次全量对账（幂等，可反复调用）。 */
-    suspend fun syncFromMediaStore(onProgress: suspend (scanned: Int, changed: Int) -> Unit): SyncResult =
+    /**
+     * 用 MediaStore 做一次全量对账（幂等，可反复调用）。
+     *
+     * [scope] 来自设置（隐藏目录 / 排除目录），直接进 MediaStore 查询条件；
+     * 被排除的图片不会进索引，已索引但后来被排除的行会在这一轮因为"没被看到"而标为缺席。
+     */
+    suspend fun syncFromMediaStore(
+        scope: ScanScope = ScanScope.Default,
+        onProgress: suspend (scanned: Int, changed: Int) -> Unit,
+    ): SyncResult =
         scanMutex.withLock {
             val existing = mediaDao.idStates().associateBy { it.id }
             var scanned = 0
             var changed = 0
             val seenIds = ArrayList<Long>(existing.size + 1024)
-            dataSource.queryImages { batch ->
+            dataSource.queryImages(scope) { batch ->
                 val changedItems = batch.filter { existing[it.id]?.dateModifiedMs != it.dateModifiedMs }
                 if (changedItems.isNotEmpty()) {
                     mediaDao.upsertAll(changedItems)
@@ -177,6 +189,39 @@ class MediaRepository(
         database.duplicateDao().clearGroups()
         mediaDao.clear()
     }
+
+    /** 组合筛选的命中数与占用空间（规划 B-10）。 */
+    suspend fun count(filter: MediaFilter): Long =
+        mediaDao.countRaw(MediaFilterSql.toQuery("COUNT(*)", filter, SortOrder.DATE_DESC.sql))
+
+    suspend fun sumSize(filter: MediaFilter): Long =
+        mediaDao.sumSizeRaw(MediaFilterSql.toQuery("COALESCE(SUM(sizeBytes), 0)", filter, SortOrder.DATE_DESC.sql))
+
+    /** 存储仪表盘（规划 E-02/E-03）。 */
+    suspend fun statsByFormat(): List<StatRow> = mediaDao.statsByFormat()
+
+    suspend fun statsByYear(): List<StatRow> = mediaDao.statsByYear()
+
+    suspend fun statsByFolder(limit: Int = 12): List<StatRow> = mediaDao.statsByFolder(limit)
+
+    suspend fun distinctFolders(): List<String> = mediaDao.distinctFolders()
+
+    /** 按拍摄时间区间取 id（"这一年/这一月"批量操作）。 */
+    suspend fun idsInRange(fromMs: Long, toMs: Long): List<Long> = mediaDao.idsInRange(fromMs, toMs)
+
+    // ---- 保存的筛选条件（规划 B-17） ----
+
+    fun savedFilters(): Flow<List<SavedFilterEntity>> = database.savedFilterDao().observeAll()
+
+    suspend fun saveFilter(name: String, filter: MediaFilter): Long = database.savedFilterDao().insert(
+        SavedFilterEntity(
+            name = name.trim().ifBlank { "未命名筛选" },
+            filterJson = SavedFilterCodec.encode(filter),
+            createdAtMs = System.currentTimeMillis(),
+        ),
+    )
+
+    suspend fun deleteSavedFilter(id: Long) = database.savedFilterDao().deleteById(id)
 
     suspend fun stats(): RepositoryStats {
         val count = mediaDao.countAll()

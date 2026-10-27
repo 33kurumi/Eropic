@@ -1,9 +1,14 @@
 package io.github.kurumi33.eropic.ui.viewer
 
+import android.app.WallpaperManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -13,8 +18,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,10 +45,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 全屏大图查看器：黑色背景 + 顶部半透明标题栏，图片区域整屏铺开。
@@ -94,8 +107,25 @@ fun ImageViewerScreen(
     var currentPageZoomed by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
+    // 幻灯片播放间隔来自设置页；菜单展开状态只属于本页。
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    var slideshow by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+
     LaunchedEffect(currentId) { favoriteOverride = null }
     LaunchedEffect(currentPage) { currentPageZoomed = false }
+
+    // 幻灯片：停在当前页等一个间隔，然后自动滑到下一页；到末尾自动停。
+    LaunchedEffect(slideshow, currentPage, mediaIds.size, settings.slideshowIntervalSec) {
+        if (!slideshow) return@LaunchedEffect
+        delay(settings.slideshowIntervalSec * 1000L)
+        val next = currentPage + 1
+        if (next > mediaIds.lastIndex) {
+            slideshow = false
+        } else {
+            pagerState.animateScrollToPage(next)
+        }
+    }
 
     // 收藏判定 = MediaStore 收藏 或 App 内本地收藏。
     val isFavorite = favoriteOverride
@@ -121,6 +151,48 @@ fun ImageViewerScreen(
         }
     }
 
+    // 设为壁纸：读原始图片流交给系统，不复制文件、不改动图库。
+    val setAsWallpaper: () -> Unit = {
+        val id = currentId
+        if (id != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openInputStream(MediaUris.of(id))?.use { input ->
+                            WallpaperManager.getInstance(context).setStream(input)
+                        } != null
+                    }.getOrDefault(false)
+                }
+                Toast.makeText(
+                    context,
+                    if (ok) "已设为壁纸" else "设置壁纸失败（图片可能已损坏或格式不被系统支持）",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
+
+    // 交给系统相册打开，方便需要系统编辑能力时跳过去。
+    val openInGallery: () -> Unit = {
+        val id = currentId
+        if (id != null) {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(MediaUris.of(id), currentEntity?.mimeType ?: "image/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { context.startActivity(intent) }
+        }
+    }
+
+    val copyPath: () -> Unit = {
+        val path = currentEntity?.path
+        if (!path.isNullOrBlank()) {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText("图片路径", path))
+            Toast.makeText(context, "路径已复制", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     // 详情面板打开时把返回键让给它自己关闭。
     BackHandler(enabled = !detailsOpen) { onClose() }
 
@@ -131,7 +203,22 @@ fun ImageViewerScreen(
             if (headerVisible) {
                 TopAppBar(
                     title = {
-                        Text(text = "${currentPage + 1} / ${mediaIds.size}")
+                        Column {
+                            Text(
+                                text = "${currentPage + 1} / ${mediaIds.size}" +
+                                    if (slideshow) "　▶ 播放中" else "",
+                            )
+                            // 外置存储（SD / U 盘）在 Android 上是只读挂载，写操作会失败，这里明确提示。
+                            if (currentEntity != null && currentEntity?.volumeName != "external_primary") {
+                                Text(
+                                    text = "外置存储 · 只读查看",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     },
                     navigationIcon = {
                         IconButton(onClick = onClose) {
@@ -167,6 +254,45 @@ fun ImageViewerScreen(
                             Icon(
                                 imageVector = Icons.Filled.Share,
                                 contentDescription = "分享",
+                            )
+                        }
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(
+                                imageVector = Icons.Filled.MoreVert,
+                                contentDescription = "更多操作",
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(if (slideshow) "停止幻灯片" else "幻灯片播放") },
+                                onClick = {
+                                    slideshow = !slideshow
+                                    menuOpen = false
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("设为壁纸") },
+                                onClick = {
+                                    menuOpen = false
+                                    setAsWallpaper()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("用系统相册打开") },
+                                onClick = {
+                                    menuOpen = false
+                                    openInGallery()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("复制文件路径") },
+                                onClick = {
+                                    menuOpen = false
+                                    copyPath()
+                                },
                             )
                         }
                     },

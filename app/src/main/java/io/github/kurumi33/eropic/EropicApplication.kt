@@ -1,6 +1,8 @@
 package io.github.kurumi33.eropic
 
 import android.app.Application
+import io.github.kurumi33.eropic.core.log.CrashLogger
+import io.github.kurumi33.eropic.core.notify.TrashCleanupScheduler
 import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.core.sync.MediaChangeObserver
 import io.github.kurumi33.eropic.core.sync.SyncScheduler
@@ -20,6 +22,9 @@ class EropicApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // 0) 崩溃日志：只在应用私有目录留最近 10 份，供"关于"页查看，不联网。
+        CrashLogger.install(this)
 
         // 1) 设置里的缩略图缓存开关/上限同步给缓存层；上限调小时立刻裁剪到新上限。
         appScope.launch {
@@ -45,13 +50,23 @@ class EropicApplication : Application() {
         //    不用用户手动再点"开始扫描"。见 maybeResumeInterruptedIndex()。
         appScope.launch { maybeResumeInterruptedIndex() }
 
-        // 6) 回收站过期清理：默认保留 30 天，超期的文件才真正删除。
+        // 6) 回收站过期清理：按设置里的保留期清理，超期的文件才真正删除。
         //    这是用户明示的保留策略，不是"自动删照片"；没有所有文件访问权限时跳过。
         appScope.launch {
             runCatching {
                 if (StorageAccess.hasAllFilesAccess()) container.trashRepository.cleanupExpired()
+                // 顺带检查"即将到期"，有的话发一条通知提醒用户决定恢复还是让它到期。
+                val expiring = container.trashRepository.expiringSoon()
+                if (expiring.isNotEmpty()) {
+                    io.github.kurumi33.eropic.core.notify.TrashNotifications.notifyExpiring(
+                        this@EropicApplication,
+                        expiring.size,
+                    )
+                }
             }
         }
+        // 7) 每天兜底清理一次：进程不在时也要能按时清理过期条目。
+        TrashCleanupScheduler.ensurePeriodic(this)
     }
 
     /**
@@ -69,6 +84,6 @@ class EropicApplication : Application() {
         val hashed = runCatching { container.mediaRepository.countHashed() }.getOrDefault(0)
         if (hashed <= 0) return
         val needing = runCatching { container.mediaRepository.countNeedingSignature() }.getOrDefault(0)
-        if (needing > 0) coordinator.start()
+        if (needing > 0) coordinator.start(similarity = settings.similarity, scope = settings.scanScope())
     }
 }

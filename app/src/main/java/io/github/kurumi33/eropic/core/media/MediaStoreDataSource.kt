@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.index.ScanScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -18,7 +19,10 @@ import java.io.File
  */
 class MediaStoreDataSource(private val context: Context) {
 
-    suspend fun queryImages(onBatch: suspend (List<MediaEntity>) -> Unit) = withContext(Dispatchers.IO) {
+    suspend fun queryImages(
+        scope: ScanScope = ScanScope.Default,
+        onBatch: suspend (List<MediaEntity>) -> Unit,
+    ) = withContext(Dispatchers.IO) {
         val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
@@ -38,10 +42,13 @@ class MediaStoreDataSource(private val context: Context) {
             MediaStore.Images.Media.VOLUME_NAME,
             MediaStore.Images.Media.RELATIVE_PATH,
         )
-        val selection = "${MediaStore.MediaColumns.IS_PENDING} = 0 AND ${MediaStore.MediaColumns.IS_TRASHED} = 0"
+        // 扫描范围（隐藏目录 / 排除目录）直接进 selection：先全查再过滤会让 10 万级的扫描慢一倍
+        val (selection, selectionArgs) = scope.selection(
+            "${MediaStore.MediaColumns.IS_PENDING} = 0 AND ${MediaStore.MediaColumns.IS_TRASHED} = 0"
+        )
         val order = "${MediaStore.Images.Media.DATE_MODIFIED} ASC"
         val batch = ArrayList<MediaEntity>(BATCH_SIZE)
-        context.contentResolver.query(collection, projection, selection, null, order)?.use { cursor ->
+        context.contentResolver.query(collection, projection, selection, selectionArgs, order)?.use { cursor ->
             val idIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
             val dataIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)

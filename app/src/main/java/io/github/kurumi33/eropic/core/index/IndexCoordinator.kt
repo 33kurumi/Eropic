@@ -4,6 +4,7 @@ import android.content.Context
 import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.media.MediaRepository
+import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 import io.github.kurumi33.eropic.core.thumb.ThumbnailCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,9 +33,19 @@ data class IndexState(
     val message: String = "",
     val startedAtMs: Long = 0L,
     val finishedAtMs: Long = 0L,
+    /** 无法解码而跳过的张数（解码失败的图不会反复重算） */
+    val skippedCount: Int = 0,
 ) {
     val isRunning: Boolean
         get() = phase == IndexPhase.SYNCING || phase == IndexPhase.HASHING || phase == IndexPhase.DEDUPING
+
+    /** 已耗时（运行中按当前时间，结束后按结束时间）。 */
+    val elapsedMs: Long
+        get() = when {
+            startedAtMs <= 0L -> 0L
+            finishedAtMs > 0L -> finishedAtMs - startedAtMs
+            else -> System.currentTimeMillis() - startedAtMs
+        }
 }
 
 /** M0 的索引编排：扫描 → 指纹 → 重复分组。串行执行，状态可观察。 */
@@ -46,25 +57,35 @@ class IndexCoordinator(
     database: EropicDatabase,
     private val thumbnailCache: ThumbnailCache,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow(IndexState())
     val state: StateFlow<IndexState> = _state.asStateFlow()
     private var job: Job? = null
 
-    fun start() {
+    /**
+     * 开始（或续算）一次索引。
+     *
+     * [similarity] 决定近重复的判定档位（设置里可调），[scope] 决定扫描哪些目录。
+     * 两者只在本次任务内生效，中途改设置不会影响已经在跑的任务。
+     */
+    fun start(
+        similarity: SimilarityLevel = SimilarityLevel.STANDARD,
+        scope: ScanScope = ScanScope.Default,
+    ) {
         if (_state.value.isRunning) return
-        job = scope.launch {
+        job = workerScope.launch {
             val started = System.currentTimeMillis()
             try {
                 _state.value = _state.value.copy(
                     phase = IndexPhase.SYNCING,
                     scanned = 0,
                     changed = 0,
-                    message = "正在读取系统相册索引…",
                     startedAtMs = started,
                     finishedAtMs = 0L,
+                    skippedCount = 0,
+                    message = "正在读取系统相册索引（${scope.describe()}）…",
                 )
-                val sync = repository.syncFromMediaStore { scanned, changed ->
+                val sync = repository.syncFromMediaStore(scope) { scanned, changed ->
                     _state.value = _state.value.copy(scanned = scanned, changed = changed)
                 }
                 _state.value = _state.value.copy(
@@ -120,7 +141,10 @@ class IndexCoordinator(
                     exactGroups = exact.groups,
                     message = "正在查找相似图片…",
                 )
-                val near = duplicateScanner.scanNear()
+                val near = duplicateScanner.scanNear(
+                    dThreshold = similarity.dhashThreshold,
+                    pThreshold = similarity.phashThreshold,
+                )
                 // 索引期间写了缩略图，结束顺手按上限裁掉最旧的（失败不影响索引结果）。
                 runCatching { thumbnailCache.trim() }
                 _state.value = _state.value.copy(
@@ -132,6 +156,7 @@ class IndexCoordinator(
                         append("完成：精确重复 ${exact.groups} 组 · 相似 ${near.groups} 组")
                         if (skipped > 0) append(" · 跳过 ${skipped} 张（无法解码）")
                     },
+                    skippedCount = skipped,
                     finishedAtMs = System.currentTimeMillis(),
                 )
             } catch (t: Throwable) {

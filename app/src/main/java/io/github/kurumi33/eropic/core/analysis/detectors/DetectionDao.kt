@@ -65,6 +65,25 @@ interface DetectionDao {
             "ORDER BY blurScore ASC, id ASC LIMIT :limit",
     )
     suspend fun blurryImages(threshold: Double, limit: Int): List<MediaEntity>
+
+    /**
+     * 连拍候选：取某个时间点之后的图片，按目录 + 拍摄时间排好序，交给 [BurstDetector] 在内存里判间隔。
+     *
+     * 不在 SQL 里直接算间隔的原因：SQLite 窗口函数要 API 30+ 才稳定可用，
+     * 而这里用 LIMIT 限制上限（默认两万行）后，一次线性扫描的开销远小于维护窗口函数查询。
+     */
+    @Query(
+        "SELECT * FROM media_item WHERE isPresent = 1 AND dateTakenMs > :sinceMs " +
+            "ORDER BY bucketName ASC, dateTakenMs ASC, id ASC LIMIT :limit",
+    )
+    suspend fun burstCandidates(sinceMs: Long, limit: Int): List<MediaEntity>
+
+    /** 小图：按面积从小到大；面积用 width*height 现算，避免再加一列派生数据。 */
+    @Query(
+        "SELECT * FROM media_item WHERE isPresent = 1 AND width > 0 AND height > 0 " +
+            "AND (width * height) < :maxPixels ORDER BY (width * height) ASC, id ASC LIMIT :limit",
+    )
+    suspend fun smallImages(maxPixels: Int, limit: Int): List<MediaEntity>
 }
 
 /** [DetectionDao.largeFileSummary] 的聚合行；字段名必须和 SQL 里的别名一致，Room 靠列名映射。 */

@@ -18,12 +18,18 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.exifinterface.media.ExifInterface
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.ui.common.formatBytes
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -61,6 +67,8 @@ fun ImageDetailsSheet(entity: MediaEntity, onDismiss: () -> Unit) {
         )
         DetailRow(label = "dHash", value = formatHash(entity.dhash))
         DetailRow(label = "pHash", value = formatHash(entity.phash))
+        ExifSection(entity = entity)
+
         DetailRow(
             label = "完整路径",
             value = entity.path,
@@ -86,6 +94,84 @@ fun ImageDetailsSheet(entity: MediaEntity, onDismiss: () -> Unit) {
         }
         Spacer(modifier = Modifier.height(8.dp))
     }
+}
+
+/**
+ * 相机 EXIF 区（M4 · T3）：直接读原始文件的 EXIF，不经 MediaStore，
+ * 所以能看到厂商、机型、光圈、快门、ISO、GPS 这些 MediaStore 不提供的字段。
+ *
+ * 用 content Uri 打开输入流而不是文件路径，避免「所有文件访问」未授权时读不到。
+ */
+@Composable
+private fun ExifSection(entity: MediaEntity) {
+    val context = LocalContext.current
+    val rows by produceState<List<Pair<String, String>>>(initialValue = emptyList(), entity.id) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                context.contentResolver.openInputStream(MediaUris.of(entity.id))?.use { input ->
+                    readExifRows(ExifInterface(input))
+                }
+            }.getOrNull() ?: emptyList()
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
+        Text(text = "相机与 EXIF", style = MaterialTheme.typography.titleSmall)
+        if (rows.isEmpty()) {
+            Text(
+                text = "没有可读的 EXIF（截图、聊天保存的图、或元数据已被清理）。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        } else {
+            rows.forEach { (label, value) -> DetailRow(label = label, value = value) }
+        }
+    }
+}
+
+/** 从 ExifInterface 抽出非空字段；「拍摄参数」把光圈/快门/ISO/焦距合成一行。 */
+private fun readExifRows(exif: ExifInterface): List<Pair<String, String>> {
+    val rows = mutableListOf<Pair<String, String>>()
+    fun add(label: String, value: String?) {
+        if (!value.isNullOrBlank()) rows += label to value
+    }
+
+    add("相机厂商", exif.getAttribute(ExifInterface.TAG_MAKE))
+    add("机型", exif.getAttribute(ExifInterface.TAG_MODEL))
+    add("镜头", exif.getAttribute(ExifInterface.TAG_LENS_MODEL))
+
+    val params = listOfNotNull(
+        exif.getAttribute(ExifInterface.TAG_F_NUMBER)?.let { "f/" + it },
+        exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME)?.let { it + " s" },
+        exif.getAttribute(ExifInterface.TAG_ISO_SPEED)?.let { "ISO " + it },
+        exif.getAttribute(ExifInterface.TAG_FOCAL_LENGTH)?.let { it + " mm" },
+    ).joinToString(" · ")
+    add("拍摄参数", params)
+
+    add("拍摄时间(EXIF)", exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL))
+    add(
+        "方向",
+        orientationLabel(exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_UNDEFINED)),
+    )
+    exif.latLong?.let { latLong ->
+        add("GPS", String.format(Locale.US, "%.6f, %.6f", latLong[0], latLong[1]))
+    }
+    add("软件", exif.getAttribute(ExifInterface.TAG_SOFTWARE))
+    return rows
+}
+
+/** EXIF 方向值转成人话，方便判断这张图会不会被旋转显示。 */
+private fun orientationLabel(orientation: Int): String = when (orientation) {
+    ExifInterface.ORIENTATION_NORMAL -> "正常"
+    ExifInterface.ORIENTATION_ROTATE_90 -> "顺时针 90°"
+    ExifInterface.ORIENTATION_ROTATE_180 -> "旋转 180°"
+    ExifInterface.ORIENTATION_ROTATE_270 -> "顺时针 270°"
+    ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> "水平镜像"
+    ExifInterface.ORIENTATION_FLIP_VERTICAL -> "垂直镜像"
+    ExifInterface.ORIENTATION_TRANSPOSE -> "镜像 + 90°"
+    ExifInterface.ORIENTATION_TRANSVERSE -> "镜像 + 270°"
+    else -> ""
 }
 
 /** 一行"标签 + 值"，右侧可选一个操作按钮（例如复制路径）。 */

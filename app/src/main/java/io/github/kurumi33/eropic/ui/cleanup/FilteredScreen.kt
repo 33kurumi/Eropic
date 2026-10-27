@@ -21,12 +21,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
+import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.BatchProgressBar
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
 import io.github.kurumi33.eropic.ui.components.MediaGrid
 import io.github.kurumi33.eropic.ui.components.SelectionTopBar
 import io.github.kurumi33.eropic.ui.components.shareImages
+import io.github.kurumi33.eropic.ui.fileops.BatchRenameDialog
+import io.github.kurumi33.eropic.ui.fileops.CopyDialog
 import io.github.kurumi33.eropic.ui.trash.MoveDialog
 import kotlinx.coroutines.launch
 
@@ -47,6 +51,7 @@ fun FilteredScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val batchState by viewModel.batchState.collectAsStateWithLifecycle()
 
     val filter = remember(filterState) { filterState.toFilter() }
     val items = remember(filter) {
@@ -57,6 +62,8 @@ fun FilteredScreen(
     val selectionActive = selectedIds.isNotEmpty()
     var moveTargetIds by remember { mutableStateOf<List<Long>?>(null) }
     var trashTargetIds by remember { mutableStateOf<List<Long>?>(null) }
+    var renameTargetIds by remember { mutableStateOf<List<Long>?>(null) }
+    var copyTargetIds by remember { mutableStateOf<List<Long>?>(null) }
 
     // 多选时返回键先取消选择，避免一按就退出筛选页。
     BackHandler {
@@ -89,6 +96,8 @@ fun FilteredScreen(
                 onMove = { moveTargetIds = selectedIds.toList() },
                 onTrash = { trashTargetIds = selectedIds.toList() },
                 hasWriteAccess = hasWriteAccess,
+                onRename = { renameTargetIds = selectedIds.toList() },
+                onCopy = { copyTargetIds = selectedIds.toList() },
             )
         } else {
             TopAppBar(
@@ -112,6 +121,14 @@ fun FilteredScreen(
                 },
             )
         }
+
+        // 批量复制/重命名进行中时显示进度条（state.active 为 false 时它自己返回、不占空间）。
+        BatchProgressBar(
+            state = batchState,
+            onPause = viewModel::pauseBatch,
+            onResume = viewModel::resumeBatch,
+            onCancel = viewModel::cancelBatch,
+        )
 
         MediaGrid(
             items = items,
@@ -165,6 +182,34 @@ fun FilteredScreen(
                     viewModel.postMessage(result.message, undoTrashIds = result.trashIds)
                     selectedIds = emptySet()
                 }
+            },
+        )
+    }
+
+    renameTargetIds?.let { ids ->
+        BatchRenameDialog(
+            viewModel = viewModel,
+            ids = ids,
+            onDismiss = { renameTargetIds = null },
+            onMessage = { text -> viewModel.postMessage(text) },
+            onReport = { report ->
+                selectedIds = emptySet()
+                viewModel.publishReport(report)
+                viewModel.openScreen(AppScreen.Report(report))
+            },
+        )
+    }
+
+    copyTargetIds?.let { ids ->
+        CopyDialog(
+            viewModel = viewModel,
+            mediaIds = ids,
+            onDismiss = { copyTargetIds = null },
+            onMessage = { text -> viewModel.postMessage(text) },
+            onReport = { report ->
+                selectedIds = emptySet()
+                viewModel.publishReport(report)
+                viewModel.openScreen(AppScreen.Report(report))
             },
         )
     }

@@ -42,4 +42,8 @@ interface TrashDao {
     /** 到期应清理（默认保留 30 天）。 */
     @Query("SELECT * FROM trash_item WHERE expiresAtMs <= :nowMs")
     suspend fun expiredBefore(nowMs: Long): List<TrashItemEntity>
+
+    /** 即将到期（M4 到期提醒）：在 [nowMs, beforeMs] 之间到期。 */
+    @Query("SELECT * FROM trash_item WHERE expiresAtMs > :nowMs AND expiresAtMs <= :beforeMs ORDER BY expiresAtMs ASC")
+    suspend fun expiringBetween(nowMs: Long, beforeMs: Long): List<TrashItemEntity>
 }
