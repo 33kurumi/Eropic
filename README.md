@@ -36,6 +36,19 @@ Kotlin 2.0 · Jetpack Compose（Material 3）· Room · Paging 3 · Coil 3 · Wo
 - 里程碑：M0 可行性原型 1~2 周 → M1 图库 MVP 3~4 周 → M2 清理核心 3 周 → M3 文件/回收站 2~3 周 → M4 打磨 2 周（合计约 11~14 周）
 - 下一步：真机跑 M0 基准（10 万张：扫描/解码/哈希耗时与内存）→ 补查看器/详情/筛选/排序/收藏 → M2 对比预览与移动/回收站
 
+## 试跑 M0（当前可用）
+
+```powershell
+# 构建（或直接用 Android Studio 的 Run）
+.\gradlew.bat :app:assembleDebug
+
+# 安装到手机（USB 调试已开）
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+```
+
+打开后：授予「照片和视频 → 允许全部」→ 图库 Tab 点「开始建立索引」→ 等索引进度走完 → 清理 Tab 看精确/相似重复分组（M0 只读，不提供删除/移动）。
+若系统限制后台，请在本机电池设置里允许 Eropic 后台运行，否则大批量指纹计算可能被中断（可回来重试，已算过的不会重复）。
+
 ## License
 
 待定（倾向 Apache-2.0 或 GPL-3.0，选定后补 LICENSE）。
