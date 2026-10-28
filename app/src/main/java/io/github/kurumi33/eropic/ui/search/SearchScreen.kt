@@ -4,6 +4,9 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,12 +48,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
@@ -78,6 +83,12 @@ import java.io.File
 
 /** 输入停止多久后才真正查询；太短会频繁打数据库，太长会显得卡顿。 */
 private const val SEARCH_DEBOUNCE_MS = 300L
+
+/** 搜索结果捏合列数的下限：3 列还能看清缩略图，再少就不像搜索网格了。 */
+private const val MIN_SEARCH_COLUMNS = 3
+
+/** 捏合列数上限，与设置里的网格列数上限（8）保持一致。 */
+private const val MAX_SEARCH_COLUMNS = 8
 
 /** 搜索命中的总张数与总大小（分页只给当前页，不能拿 itemCount 当总数）。 */
 private data class SearchStats(val count: Long, val bytes: Long)
@@ -109,6 +120,12 @@ fun SearchScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var stats by remember { mutableStateOf<SearchStats?>(null) }
     var showSaveDialog by remember { mutableStateOf(false) }
+    // 双指捏合临时改的列数：只影响本次浏览，不回写设置，离开页面就恢复。
+    var columnOverride by remember { mutableStateOf<Int?>(null) }
+    // 3 列是可用下限，8 列与设置里的上限一致。
+    val columns = (columnOverride ?: settings.gridColumns).coerceIn(MIN_SEARCH_COLUMNS, MAX_SEARCH_COLUMNS)
+    // 设置里改了列数就丢掉本页的临时覆盖，否则会看起来「设置没生效」。
+    LaunchedEffect(settings.gridColumns) { columnOverride = null }
 
     // 常用目录只在进页面时取一次：图库变化后重进页面会刷新。
     val commonFolders by produceState<List<String>>(initialValue = emptyList()) {
@@ -235,7 +252,8 @@ fun SearchScreen(
                 query = query,
                 stats = stats,
                 items = items,
-                columns = settings.gridColumns,
+                columns = columns,
+                onColumnsChange = { columnOverride = it },
                 thumbnailsEnabled = settings.thumbnailCacheEnabled,
                 thumbnailProvider = { item -> viewModel.thumbnailFile(item) },
                 onSaveFilter = { showSaveDialog = true },
@@ -405,6 +423,7 @@ private fun SearchResults(
     stats: SearchStats?,
     items: LazyPagingItems<MediaEntity>,
     columns: Int,
+    onColumnsChange: (Int) -> Unit,
     thumbnailsEnabled: Boolean,
     thumbnailProvider: suspend (MediaEntity) -> File?,
     onSaveFilter: () -> Unit,
@@ -445,6 +464,7 @@ private fun SearchResults(
             else -> SearchResultGrid(
                 items = items,
                 columns = columns,
+                onColumnsChange = onColumnsChange,
                 thumbnailsEnabled = thumbnailsEnabled,
                 thumbnailProvider = thumbnailProvider,
                 onOpenItem = onOpenItem,
@@ -453,18 +473,24 @@ private fun SearchResults(
     }
 }
 
-/** 搜索结果网格：单元格与图库一致，优先缩略图缓存、回退系统图片 URI。 */
+/**
+ * 搜索结果网格：单元格与图库一致，优先缩略图缓存、回退系统图片 URI。
+ * 支持双指捏合临时改列数（3..8），只影响本次浏览，不同步到设置。
+ */
 @Composable
 private fun SearchResultGrid(
     items: LazyPagingItems<MediaEntity>,
     columns: Int,
+    onColumnsChange: (Int) -> Unit,
     thumbnailsEnabled: Boolean,
     thumbnailProvider: suspend (MediaEntity) -> File?,
     onOpenItem: (MediaEntity) -> Unit,
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .pinchToChangeColumns(columns, MIN_SEARCH_COLUMNS, MAX_SEARCH_COLUMNS, onColumnsChange),
         contentPadding = PaddingValues(2.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -581,6 +607,50 @@ private fun SearchErrorState(message: String?, onRetry: () -> Unit) {
             textAlign = TextAlign.Center,
         )
         TextButton(onClick = onRetry, modifier = Modifier.padding(top = 8.dp)) { Text("重试") }
+    }
+}
+
+/**
+ * 双指捏合切换网格列数（复制自 ui/components/MediaGrid.kt，只把上下限改成参数）。
+ *
+ * 只观察、不消费触摸事件：单指滑动仍然交给 LazyVerticalGrid 自己滚动，
+ * 只有真的检测到双指缩放累积超过阈值时才回调一次，避免翻一张图就把列数跳乱。
+ */
+@Composable
+private fun Modifier.pinchToChangeColumns(
+    columns: Int,
+    minColumns: Int,
+    maxColumns: Int,
+    onColumnsChange: (Int) -> Unit,
+): Modifier {
+    val latestColumns = rememberUpdatedState(columns)
+    val latestOnChange = rememberUpdatedState(onColumnsChange)
+    return pointerInput(Unit) {
+        var accumulated = 1f
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false)
+            do {
+                val event = awaitPointerEvent()
+                val pressedCount = event.changes.count { it.pressed }
+                if (pressedCount >= 2) {
+                    val zoom = event.calculateZoom()
+                    if (zoom.isFinite() && zoom > 0f && zoom != 1f) {
+                        accumulated *= zoom
+                        val current = latestColumns.value
+                        if (accumulated > 1.3f && current > minColumns) {
+                            latestOnChange.value(current - 1)
+                            accumulated = 1f
+                        } else if (accumulated < 0.7f && current < maxColumns) {
+                            latestOnChange.value(current + 1)
+                            accumulated = 1f
+                        }
+                    }
+                } else {
+                    // 手指减少时重置累积，避免一次捏合被算成连续多次。
+                    accumulated = 1f
+                }
+            } while (event.changes.any { it.pressed })
+        }
     }
 }
 

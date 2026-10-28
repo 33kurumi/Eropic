@@ -16,6 +16,8 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Cookie
+import okhttp3.CookieJar
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -44,6 +46,12 @@ class OnlineImageSearch(
      * 用户在设置页填完 key 立刻生效，不用重建 ViewModel 或重进页面。
      */
     private val sauceNaoApiKey: () -> String,
+    /**
+     * 每次搜索时现取 whos.tv 的「用户名 to 密码」。
+     *
+     * 和 SauceNAO key 一样用函数而不是构造时快照：用户在设置里改完账号，回识图页立刻生效。
+     */
+    private val whosTvAccount: () -> Pair<String, String>,
 ) {
 
     suspend fun search(uri: Uri, provider: ReverseImageProvider): OnlineSearchResult =
@@ -77,6 +85,8 @@ class OnlineImageSearch(
             ReverseImageProvider.YANDEX -> yandex(bytes, mime)
             ReverseImageProvider.SAUCENAO -> sauceNao(bytes, mime)
             ReverseImageProvider.ASCII2D -> ascii2d(bytes, mime)
+            ReverseImageProvider.BAIDU -> baidu(bytes, mime)
+            ReverseImageProvider.WHOSTV -> whosTv(bytes, mime)
         }
 
     /**
@@ -281,15 +291,154 @@ class OnlineImageSearch(
         }
     }
 
-    private fun post(url: HttpUrl, body: RequestBody): Response {
-        val request = Request.Builder()
+    /**
+     * 百度识图。
+     *
+     * 端点（非官方）：POST https://graph.baidu.com/upload?uptime=<毫秒时间戳>
+     * 表单字段：image = 图片文件、image_source = PC_UPLOAD_SEARCH_FILE（网页端固定值）、
+     *          range = 一段固定的 JSON（表示"来自搜索结果页"的来源标记，缺了也能用）
+     * 返回 JSON：{"status":0,"data":{"url":"https://graph.baidu.com/s?..."}}，取 data.url 直接打开即可。
+     *
+     * 这是整套联网识图里**唯一国内直连不需要代理**的一家，所以放在按钮列表靠后但文案上会标注"国内直连"。
+     */
+    private fun baidu(bytes: ByteArray, mime: String): OnlineSearchResult {
+        val provider = ReverseImageProvider.BAIDU
+        val url = UPLOAD_URL_BAIDU.toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addQueryParameter("uptime", System.currentTimeMillis().toString())
+            ?.build()
+            ?: return failed(provider, "内部错误：上传地址拼装失败")
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("image", IMAGE_FILE_NAME, bytes.toRequestBody(mime.toMediaType()))
+            .addFormDataPart("image_source", BAIDU_IMAGE_SOURCE)
+            .addFormDataPart("range", BAIDU_RANGE_JSON)
+            .build()
+        post(url, body, referer = "https://graph.baidu.com/").use { response ->
+            if (!response.isSuccessful) return failed(provider, "百度识图返回 HTTP " + response.code)
+            val text = response.body?.string().orEmpty()
+            val resultUrl = ReverseSearchParsers.baiduResultUrl(text)
+                ?: return failed(
+                    provider,
+                    "百度识图没有返回结果页（接口可能已变更，HTTP " + response.code + "）",
+                )
+            return OnlineSearchResult(provider = provider, ok = true, resultUrl = resultUrl)
+        }
+    }
+
+    /**
+     * whos.tv 截图搜番号。
+     *
+     * 与其它几家最大的不同：**它不是匿名服务**。对照 FlanChanXwO/whostv-toolkit-manager：
+     * - 先 POST /api/login（JSON: username/password），服务端种 cookie 维持会话；
+     * - 搜一下要扣积分（每天签到 +10），积分不够会直接拒绝；
+     * - POST /upload-search（multipart 字段 file）返回 /search-wait/<id>，
+     *   然后轮询 GET /search-status/<id>（带 X-Requested-With: XMLHttpRequest），返回结果页 URL，
+     *   或者 {"code":404000} 表示任务不存在、URL 以 /error 结尾表示没匹配到。
+     * - 站点在 Cloudflare 后面，官方工具箱要靠 curl_cffi 的 TLS 指纹甚至真浏览器才稳；
+     *   我们只有 OkHttp，所以这里**按尽力而为处理**：失败时明确告诉用户去浏览器手动传。
+     */
+    private fun whosTv(bytes: ByteArray, mime: String): OnlineSearchResult {
+        val provider = ReverseImageProvider.WHOSTV
+        val (username, password) = whosTvAccount()
+        if (username.isBlank() || password.isBlank()) return failed(provider, WHOS_TV_NO_ACCOUNT_MESSAGE)
+
+        // 1) 登录（cookie 由 client 的内存 CookieJar 保存）
+        val loginUrl = (WHOS_TV_BASE + WHOS_TV_LOGIN_PATH).toHttpUrlOrNull()
+            ?: return failed(provider, "内部错误：登录地址拼装失败")
+        val loginJson = """{"username":""" + jsonString(username) + ""","password":""" + jsonString(password) + """}"""
+        val loginBody = loginJson.toRequestBody(JSON_MEDIA_TYPE)
+        post(loginUrl, loginBody, referer = "$WHOS_TV_BASE/").use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) return failed(provider, whosTvHttpMessage(response.code))
+            val code = ReverseSearchParsers.whosStatusCode(text)
+            if (code != null && code != WHOS_TV_CODE_OK) {
+                val detail = ReverseSearchParsers.whosMessage(text) ?: ("错误码 " + code)
+                return failed(provider, "whos.tv 登录失败：" + detail)
+            }
+        }
+
+        // 2) 上传并触发搜索
+        val uploadUrl = (WHOS_TV_BASE + WHOS_TV_UPLOAD_PATH).toHttpUrlOrNull()
+            ?: return failed(provider, "内部错误：上传地址拼装失败")
+        val uploadBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("file", IMAGE_FILE_NAME, bytes.toRequestBody(mime.toMediaType()))
+            .build()
+        val searchId: String
+        post(uploadUrl, uploadBody, referer = "$WHOS_TV_BASE/").use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) return failed(provider, whosTvHttpMessage(response.code))
+            val code = ReverseSearchParsers.whosStatusCode(text)
+            if (code != null && code != WHOS_TV_CODE_OK) {
+                val detail = ReverseSearchParsers.whosMessage(text) ?: ("错误码 " + code)
+                return failed(provider, "whos.tv 拒绝搜索：" + detail + "（积分不足时可在官网签到）")
+            }
+            val direct = ReverseSearchParsers.whosResultUrl(text)
+            if (direct != null) return OnlineSearchResult(provider = provider, ok = true, resultUrl = direct)
+            searchId = ReverseSearchParsers.whosSearchId(text)
+                ?: return failed(provider, "whos.tv 没有返回搜索任务号（接口可能已变更）")
+        }
+
+        // 3) 轮询结果（服务端是异步任务，一般几秒，慢的时候十几秒）
+        val deadline = System.currentTimeMillis() + WHOS_TV_POLL_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            val statusUrl = (WHOS_TV_BASE + WHOS_TV_STATUS_PATH + searchId).toHttpUrlOrNull()
+                ?: return failed(provider, "内部错误：状态地址拼装失败")
+            get(statusUrl, referer = "$WHOS_TV_BASE/", extraHeader = "X-Requested-With" to "XMLHttpRequest")
+                .use { response ->
+                    val text = response.body?.string().orEmpty().trim()
+                    if (!response.isSuccessful) return failed(provider, whosTvHttpMessage(response.code))
+                    val direct = ReverseSearchParsers.whosResultUrl(text)
+                    if (direct != null) return OnlineSearchResult(provider = provider, ok = true, resultUrl = direct)
+                    val code = ReverseSearchParsers.whosStatusCode(text)
+                    if (code == WHOS_TV_CODE_TASK_MISSING) {
+                        return failed(provider, "whos.tv 的搜索任务不存在或已过期，请重试")
+                    }
+                }
+            Thread.sleep(WHOS_TV_POLL_INTERVAL_MS)
+        }
+        return failed(provider, "whos.tv 在 " + (WHOS_TV_POLL_TIMEOUT_MS / 1000) + " 秒内没有给出结果，可到官网手动上传")
+    }
+
+    /** JSON 字符串转义（只需要处理引号/反斜杠/控制字符；用户名密码里不会有别的花样）。 */
+    private fun jsonString(raw: String): String {
+        val out = StringBuilder(raw.length + 2)
+        out.append('"')
+        for (c in raw) {
+            when (c) {
+                '"' -> out.append("\\\"")
+                '\\' -> out.append("\\\\")
+                '\n' -> out.append("\\n")
+                '\r' -> out.append("\\r")
+                '\t' -> out.append("\\t")
+                else -> if (c < ' ') out.append("\\u%04x".format(c.code)) else out.append(c)
+            }
+        }
+        out.append('"')
+        return out.toString()
+    }
+
+    private fun post(url: HttpUrl, body: RequestBody, referer: String? = null): Response {
+        val builder = Request.Builder()
             .url(url)
             // 这些网页接口会按 UA 返回不同版本（移动端可能直接给 JS 页），用桌面 UA 最稳
             .header("User-Agent", USER_AGENT)
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
             .post(body)
-            .build()
-        return client.newCall(request).execute()
+        if (referer != null) builder.header("Referer", referer)
+        return client.newCall(builder.build()).execute()
+    }
+
+    private fun get(url: HttpUrl, referer: String, extraHeader: Pair<String, String>? = null): Response {
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Referer", referer)
+            .get()
+        if (extraHeader != null) builder.header(extraHeader.first, extraHeader.second)
+        return client.newCall(builder.build()).execute()
     }
 
     /**
@@ -326,6 +475,26 @@ class OnlineImageSearch(
         const val UPLOAD_URL_YANDEX = "https://yandex.com/images/search"
         const val UPLOAD_URL_SAUCE_NAO = "https://saucenao.com/search.php"
         const val UPLOAD_URL_ASCII2D = "https://ascii2d.net/search/file"
+        const val UPLOAD_URL_BAIDU = "https://graph.baidu.com/upload"
+
+        /** 百度识图网页端固定值：表示"从本地上传一张图来搜"。 */
+        const val BAIDU_IMAGE_SOURCE = "PC_UPLOAD_SEARCH_FILE"
+
+        /** 百度识图网页端的来源标记；服务端对新客户端偶尔宽容，缺了通常也能用。 */
+        const val BAIDU_RANGE_JSON = """{"page_from":"searchIndex","search_from":"result"}"""
+
+        const val WHOS_TV_BASE = "https://whos.tv"
+        const val WHOS_TV_LOGIN_PATH = "/api/login"
+        const val WHOS_TV_UPLOAD_PATH = "/upload-search"
+        const val WHOS_TV_STATUS_PATH = "/search-status/"
+        const val WHOS_TV_CODE_OK = 200000
+        const val WHOS_TV_CODE_TASK_MISSING = 404000
+
+        /** whos.tv 是异步任务：官方工具箱默认轮询 120 秒，这里给 60 秒（手机端不值得等太久）。 */
+        const val WHOS_TV_POLL_TIMEOUT_MS = 60_000L
+        const val WHOS_TV_POLL_INTERVAL_MS = 2_000L
+
+        val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         const val DEFAULT_MIME = "image/jpeg"
         const val IMAGE_FILE_NAME = "image.jpg"
@@ -346,13 +515,40 @@ class OnlineImageSearch(
 
         const val YANDEX_REQUEST_JSON = """{"blocks":[{"block":"b-page_type_search-by-image__link"}]}"""
 
+        /**
+         * 内存 CookieJar：只有 whos.tv 需要（登录后用 cookie 维持会话）。
+         *
+         * 不落盘是刻意的：这些 cookie 只是临时会话凭据，进程结束就该失效；
+         * 每次搜索重新登录一次，代价是 1 个请求，换来"用户改完账号立刻生效"。
+         */
+        private val cookieJar: CookieJar = object : CookieJar {
+            private val store = java.util.concurrent.ConcurrentHashMap<String, MutableList<Cookie>>()
+
+            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                val list = store.getOrPut(url.host) { java.util.Collections.synchronizedList(mutableListOf()) }
+                synchronized(list) {
+                    for (cookie in cookies) {
+                        list.removeAll { it.name == cookie.name }
+                        list.add(cookie)
+                    }
+                }
+            }
+
+            override fun loadForRequest(url: HttpUrl): List<Cookie> {
+                val list = store[url.host] ?: return emptyList()
+                return synchronized(list) { list.filter { it.matches(url) } }
+            }
+        }
+
         /** 共用连接池；超时按「一次上传 + 服务端处理」估，20s 足够，也避免用户等太久。 */
         val client: OkHttpClient by lazy {
             OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .writeTimeout(20, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
+                // whos.tv 的异步任务要轮询，单次 callTimeout 20s 够用，整体等待由 whosTv 自己控制
                 .callTimeout(20, TimeUnit.SECONDS)
+                .cookieJar(cookieJar)
                 .build()
         }
     }
@@ -448,6 +644,48 @@ internal object ReverseSearchParsers {
                 extUrl = firstHttpUrlInArray(obj, "ext_urls"),
             )
         }
+
+    /** 百度识图返回体里的 "url":"https://graph.baidu.com/s?..."（值可能带转义斜杠）。 */
+    private val BAIDU_URL_FIELD = Regex("\"url\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+
+    /**
+     * 从百度识图的上传响应里取结果页链接。
+     *
+     * 响应形如 {"status":0,"data":{"url":"https://graph.baidu.com/s?..."}}。
+     * 只认 graph.baidu.com 的链接：同响应里可能还有别的 url 字段（缩略图、埋点），取第一个会拿错。
+     */
+    fun baiduResultUrl(body: String): String? =
+        BAIDU_URL_FIELD.findAll(body)
+            .map { unescapeJsonString(it.groupValues[1]) }
+            .firstOrNull { it.contains("graph.baidu.com/s") || it.contains("graph.baidu.com/details") }
+
+    /** whos.tv 上传响应里的任务号：/search-wait/<id>（有时是 JSON 里的一段字符串）。 */
+    private val WHOS_TV_SEARCH_ID = Regex("/search-wait/([A-Za-z0-9_-]+)")
+
+    /** whos.tv 任何响应里的 "code":200000 / "code":404000。 */
+    private val WHOS_TV_CODE = Regex("\"code\"\\s*:\\s*(-?\\d+)")
+
+    /** whos.tv 响应里的 "message":"..." 或 "msg":"..."（错误提示用的字段名两种都出现过）。 */
+    private val WHOS_TV_MESSAGE = Regex("\"(?:message|msg)\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+
+    /** whos.tv 结果页 URL：轮询成功时响应体直接就是一个 https://whos.tv/search/... 链接。 */
+    private val WHOS_TV_RESULT_URL = Regex("https?://(?:www\\.)?whos\\.tv/(?:search|v/)[^\"'<>\\s]+")
+
+    /** 取 whos.tv 的任务号（/search-wait/<id> 里的 id）。 */
+    fun whosSearchId(body: String): String? =
+        WHOS_TV_SEARCH_ID.find(body)?.groupValues?.get(1)
+
+    /** 取 whos.tv 的结果页链接（响应体可能是纯链接，也可能包在 JSON 里）。 */
+    fun whosResultUrl(body: String): String? =
+        WHOS_TV_RESULT_URL.find(body)?.value
+
+    /** 取 whos.tv 响应里的业务 code。 */
+    fun whosStatusCode(body: String): Int? =
+        WHOS_TV_CODE.find(body)?.groupValues?.get(1)?.toIntOrNull()
+
+    /** 取 whos.tv 响应里的错误文案。 */
+    fun whosMessage(body: String): String? =
+        WHOS_TV_MESSAGE.find(body)?.groupValues?.get(1)?.let(::unescapeJsonString)
 
     /** 取 JSON 里某个键对应的数组中的第一个 http(s) 字符串（用于 ext_urls）。 */
     private fun firstHttpUrlInArray(body: String, key: String): String? {
@@ -582,6 +820,19 @@ internal fun sauceNaoStatusMessage(status: Int): String = when (status) {
     -2 -> "SauceNAO 请求太频繁（免费额度有冷却时间），请稍后再试"
     -3 -> "SauceNAO 搜索出错，请稍后再试"
     else -> "SauceNAO 返回错误码 " + status + "，请稍后再试"
+}
+
+/** whos.tv 没配置账号时的提示：它家必须登录，匿名用不了。 */
+internal const val WHOS_TV_NO_ACCOUNT_MESSAGE =
+    "whos.tv 需要账号：请在 设置 → 联网识图 填 whos.tv 用户名与密码（每次搜图会扣积分，可到官网签到）"
+
+/** whos.tv 的 HTTP 状态码到中文提示。 */
+internal fun whosTvHttpMessage(code: Int): String = when (code) {
+    // Cloudflare 挡在我们和 whos.tv 之间时，返回的通常是 403 + 人机校验页
+    403 -> "whos.tv 返回 403：可能被 Cloudflare 人机校验拦住了，请到 whos.tv 网页里手动上传（或用浏览器登录一次再试）"
+    429 -> "whos.tv 请求太频繁，请稍后再试"
+    401 -> "whos.tv 登录失败：用户名或密码不对，请到 设置 → 联网识图 检查"
+    else -> "whos.tv 返回 HTTP " + code
 }
 
 /** SauceNAO 的 HTTP 状态码到中文提示（服务端连 status 都不给时只能靠它）。 */

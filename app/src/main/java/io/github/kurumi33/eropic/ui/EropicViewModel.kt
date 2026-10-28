@@ -585,6 +585,7 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     private val onlineSearchClient = OnlineImageSearch(
         contentResolver = container.appContext.contentResolver,
         sauceNaoApiKey = { settings.value.sauceNaoApiKey },
+        whosTvAccount = { settings.value.whosTvUsername to settings.value.whosTvPassword },
     )
 
     private val _similarityHits = MutableStateFlow<List<SimilarImageHit>>(emptyList())
@@ -649,6 +650,29 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             container.settingsRepository.setSauceNaoApiKey(key)
             postMessage(if (key.isBlank()) "已清空 SauceNAO API Key" else "已保存 SauceNAO API Key")
+        }
+    }
+
+    /** v0.4：设置里是否已经填了 whos.tv 账号（识图页据此提示"去设置里填"）。 */
+    fun whosTvAccountConfigured(): Boolean =
+        settings.value.whosTvUsername.isNotBlank() && settings.value.whosTvPassword.isNotBlank()
+
+    /** v0.4：保存 whos.tv 账号（密码原样落 DataStore；这是本机本地存储，不经过网络）。 */
+    fun setWhosTvAccount(username: String, password: String) {
+        viewModelScope.launch {
+            container.settingsRepository.setWhosTvAccount(username, password)
+            postMessage(
+                if (username.isBlank() || password.isBlank()) "已清空 whos.tv 账号"
+                else "已保存 whos.tv 账号",
+            )
+        }
+    }
+
+    /** v0.4：清空 whos.tv 账号。 */
+    fun clearWhosTvAccount() {
+        viewModelScope.launch {
+            container.settingsRepository.clearWhosTvAccount()
+            postMessage("已清空 whos.tv 账号")
         }
     }
 

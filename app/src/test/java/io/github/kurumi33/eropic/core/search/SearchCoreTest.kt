@@ -111,15 +111,16 @@ class SearchCoreTest {
     }
 
     @Test
-    fun reverseImageProvider_keepsFourDistinctHttpsHomes() {
+    fun reverseImageProvider_keepsSixDistinctHttpsHomes() {
         val providers = ReverseImageProvider.entries
-        assertEquals(4, providers.size)
-        // 顺序即 UI 上按钮的排列顺序：Google / Yandex / SauceNAO / ascii2d
+        assertEquals(6, providers.size)
+        // 枚举顺序是"实现顺序"；UI 上的按钮顺序由 ImageFindScreen.ONLINE_PROVIDERS 单独固定，
+        // 那里把百度识图插在 Yandex 之后、whos.tv 放最后，所以这里只校验集合内容。
         assertEquals(
-            listOf("GOOGLE_LENS", "YANDEX", "SAUCENAO", "ASCII2D"),
+            listOf("GOOGLE_LENS", "YANDEX", "SAUCENAO", "ASCII2D", "BAIDU", "WHOSTV"),
             providers.map { it.name },
         )
-        assertEquals(4, providers.map { it.label }.distinct().size)
+        assertEquals(6, providers.map { it.label }.distinct().size)
         providers.forEach { provider ->
             assertTrue(
                 "provider " + provider.name + " 的 homeUrl 必须是 https 地址",

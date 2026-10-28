@@ -61,6 +61,17 @@ data class SimilarityQuery(
  * v0.3 只保留四家：能稳定拿到结果链接的三家 + 二次元专精的 SauceNAO（需要 API Key）。
  * 被删掉的 Bing / TinEye / IQDB / trace.moe 要么接口需要 key、要么没有可复用的结果页，留着只是摆设。
  * 枚举顺序即 UI 上按钮顺序。
+ *
+ * v0.4 增加两家（2026-10-28 读完 ccloli/Search-By-Image、koishijs/plugin-image-search、
+ * 4evergr8/FlutterPicOrigin、lolishinshi/imsearch、FlanChanXwO/whostv-toolkit-manager 后的结论）：
+ * - [BAIDU]：百度识图，匿名 multipart 上传即可，且**国内不用代理**，是这几家里唯一能当「兜底」用的；
+ * - [WHOSTV]：whos.tv，截图搜番号（成人内容识别）。它**不是匿名服务**：要账号登录、每次搜图扣积分、
+ *   站点还在 Cloudflare 后面，所以实现上按「账号 + 失败提示」处理，不保证一次成功。
+ *
+ * 另外四家的对照结论：koishi 插件与 FlutterPicOrigin 走的是「先把图传到公共图床，再用各站
+ * search-by-url 链接」的路子（FlutterPicOrigin 甚至让用户自己填一个 Cloudflare Worker 地址），
+ * 因此它们能覆盖 TinEye/IQDB/trace.moe；我们不托管图片，只能走各站的匿名上传接口，
+ * 覆盖范围自然窄一些 —— 这是设计取舍，不是实现缺陷。
  */
 enum class ReverseImageProvider(val label: String, val homeUrl: String) {
     /** Google Lens：匿名上传最稳的一家，通用图片覆盖最好。 */
@@ -74,6 +85,12 @@ enum class ReverseImageProvider(val label: String, val homeUrl: String) {
 
     /** ascii2d：二次元以图搜图，匿名可用。 */
     ASCII2D("ascii2d", "https://ascii2d.net/"),
+
+    /** 百度识图：匿名上传，国内直连不需要代理；实拍/中文场景覆盖好，二次元一般。 */
+    BAIDU("百度识图", "https://graph.baidu.com/"),
+
+    /** whos.tv：截图搜番号。需要账号 + 积分，站点在 Cloudflare 后面，见 [OnlineImageSearch]。 */
+    WHOSTV("whos.tv", "https://whos.tv/"),
 }
 
 /**

@@ -94,6 +94,15 @@ data class AppSettings(
      * 不填也能用 Google Lens / Yandex / ascii2d，所以默认空串。
      */
     val sauceNaoApiKey: String = "",
+    /**
+     * v0.4：whos.tv 的账号（用户名）。
+     *
+     * whos.tv 不是匿名识图：必须先有账号登录（注册需要邀请码），而且每次搜图要扣积分，
+     * 每天签到 +10 积分。所以这两个字段默认空；不填时 whos.tv 按钮会给出「请先填账号」的提示。
+     */
+    val whosTvUsername: String = "",
+    /** v0.4：whos.tv 的密码（只存在本机 DataStore，不上传到除 whos.tv 以外的任何地方）。 */
+    val whosTvPassword: String = "",
 ) {
     /** 兼容 M4 的布尔语义：是否插入日期分组标题（= 分组粒度不是"不分组"）。 */
     val dateGrouping: Boolean get() = dateGroupMode != DateGroupMode.NONE

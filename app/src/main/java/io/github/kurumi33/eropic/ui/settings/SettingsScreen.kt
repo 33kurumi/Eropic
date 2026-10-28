@@ -6,8 +6,10 @@ import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,10 +21,12 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -48,7 +52,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.settings.AppSettings
 import io.github.kurumi33.eropic.core.settings.DateGroupMode
@@ -101,76 +104,107 @@ fun SettingsScreen(viewModel: EropicViewModel) {
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            // v0.3：每个分组前加小标题（titleSmall），卡片间距 16dp，分组之间不再糊成一片。
-            SettingsGroupTitle("外观")
-            AppearanceCard(settings = settings, viewModel = viewModel)
-
-            SettingsGroupTitle("图库与查看")
-            GalleryViewCard(settings = settings, viewModel = viewModel)
-
-            SettingsGroupTitle("清理")
-            CleanupSettingsCard(settings = settings, viewModel = viewModel)
-
-            SettingsGroupTitle("联网识图")
-            OnlineImageSearchCard(settings = settings, viewModel = viewModel)
-
-            SettingsGroupTitle("扫描范围")
-            ScanScopeCard(settings = settings, viewModel = viewModel)
-
-            SettingsGroupTitle("后台与电量")
-            BackgroundCard(settings = settings, viewModel = viewModel)
-
-            SettingsGroupTitle("存储权限")
-            StorageAccessCard(
-                hasWriteAccess = hasWriteAccess,
-                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
-            )
-
-            SettingsGroupTitle("缩略图缓存")
-            ThumbnailCacheCard(
-                settings = settings,
-                cacheSizeBytes = thumbnailCacheSize,
-                viewModel = viewModel,
-            )
-
-            SettingsGroupTitle("本地索引")
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "已索引 " + formatCount(count) + " 张 · " + formatBytes(totalSize))
-                    Text(
-                        text = "任务状态：" + indexState.phase.name,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (indexState.isRunning) {
-                        OutlinedButton(onClick = viewModel::cancelIndex) { Text("取消当前任务") }
-                    } else {
-                        Button(onClick = viewModel::startIndex) { Text("增量扫描") }
-                    }
-                    OutlinedButton(onClick = { showRebuildDialog = true }) { Text("清空并重建索引") }
-                }
+            // v0.4：每个功能组一个外框（SettingsSection），组里的行直接排在框内，不再叠一层卡片。
+            // 顺序：外观 → 图库与查看 → 清理与回收站 → 资源与缓存 → 后台与电量 → 存储权限 → 联网识图 → 更多页面 → 关于。
+            SettingsSection(
+                title = "外观",
+                subtitle = "主题与取色。",
+            ) {
+                AppearanceCard(settings = settings, viewModel = viewModel)
             }
 
-            SettingsGroupTitle("更多页面")
-            MorePagesCard(viewModel = viewModel)
+            SettingsSection(
+                title = "图库与查看",
+                subtitle = "网格列数、标题栏信息、默认排序、日期分组与幻灯片间隔。",
+            ) {
+                GalleryViewCard(settings = settings, viewModel = viewModel)
+            }
 
-            SettingsGroupTitle("关于")
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "Eropic " + versionName + " · 本地优先 · 仅「联网搜图」时联网")
-                    Text(
-                        text = "开源地址：github.com/33kurumi/Eropic",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = "没有删除按钮：所有会改动文件的操作都必须由你确认。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedButton(onClick = { viewModel.openScreen(AppScreen.About) }) {
-                        Text("权限、数据与许可详情")
-                    }
+            SettingsSection(
+                title = "清理与回收站",
+                subtitle = "回收站保留时长与相似判定档位。",
+            ) {
+                CleanupSettingsCard(settings = settings, viewModel = viewModel)
+            }
+
+            SettingsSection(
+                title = "资源与缓存",
+                subtitle = "扫描范围、缩略图缓存与本地索引状态都在这里。",
+            ) {
+                ScanScopeCard(settings = settings, viewModel = viewModel)
+                HorizontalDivider()
+                ThumbnailCacheCard(
+                    settings = settings,
+                    cacheSizeBytes = thumbnailCacheSize,
+                    viewModel = viewModel,
+                )
+                HorizontalDivider()
+                // 本地索引：已索引数量、后台任务状态与重建入口。
+                Text(
+                    text = "已索引 " + formatCount(count) + " 张 · " + formatBytes(totalSize),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text = "任务状态：" + indexState.phase.name,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (indexState.isRunning) {
+                    OutlinedButton(onClick = viewModel::cancelIndex) { Text("取消当前任务") }
+                } else {
+                    Button(onClick = viewModel::startIndex) { Text("增量扫描") }
+                }
+                OutlinedButton(onClick = { showRebuildDialog = true }) { Text("清空并重建索引") }
+            }
+
+            SettingsSection(
+                title = "后台与电量",
+                subtitle = "指纹与缩略图在什么条件下于后台补齐。",
+            ) {
+                BackgroundCard(settings = settings, viewModel = viewModel)
+            }
+
+            SettingsSection(
+                title = "存储权限",
+                subtitle = "真实移动、移入回收站与彻底删除依赖「所有文件访问」。",
+            ) {
+                StorageAccessCard(
+                    hasWriteAccess = hasWriteAccess,
+                    onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
+                )
+            }
+
+            SettingsSection(
+                title = "联网识图",
+                subtitle = "用浏览器以图搜图；SauceNAO 需要 API Key，whos.tv 需要账号 + 积分；除百度识图外都需要代理。",
+            ) {
+                OnlineImageSearchCard(settings = settings, viewModel = viewModel)
+            }
+
+            SettingsSection(
+                title = "更多页面",
+                subtitle = "底部栏放不下的二级页面。",
+            ) {
+                MorePagesCard(viewModel = viewModel)
+            }
+
+            SettingsSection(
+                title = "关于",
+                subtitle = "版本、开源地址与数据说明。",
+            ) {
+                Text(text = "Eropic " + versionName + " · 本地优先 · 仅「联网搜图」时联网")
+                Text(
+                    text = "开源地址：github.com/33kurumi/Eropic",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "没有删除按钮：所有会改动文件的操作都必须由你确认。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = { viewModel.openScreen(AppScreen.About) }) {
+                    Text("权限、数据与许可详情")
                 }
             }
         }
@@ -199,23 +233,53 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 }
 
 /**
- * 设置页的分组小标题：配合 16dp 的卡片间距，让各分组一眼能分开。
+ * v0.4：设置页的功能组外框。
+ *
+ * 每个功能组是一个大框：底色 surfaceContainerLow、无阴影；组标题与副标题在框内顶部，
+ * 组里的内容直接是清单行，不再叠一层同色卡片，避免「卡中卡」的双层灰底。
  */
 @Composable
-private fun SettingsGroupTitle(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
-    )
+private fun SettingsSection(
+    title: String,
+    subtitle: String? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            HorizontalDivider()
+            content()
+        }
+    }
 }
 
 /**
- * 联网识图：SauceNAO 的 API Key。
+ * 联网识图：SauceNAO 的 API Key + whos.tv 账号。
  *
  * 只有 SauceNAO 需要 key（免费注册后拿到）；Google Lens / Yandex / ascii2d 不填也能用。
- * key 存在本地 DataStore，只在请求 SauceNAO 时带上。
+ * whos.tv 不是匿名服务：要账号、每次搜图扣积分。两项都只存在本机 DataStore，不经过网络。
  */
 @Composable
 private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewModel) {
@@ -223,72 +287,127 @@ private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewMo
     var showKey by remember { mutableStateOf(false) }
     // 草稿随已保存的 key 同步：保存成功后 settings 变化，输入框会换成新值。
     var keyDraft by remember(settings.sauceNaoApiKey) { mutableStateOf(settings.sauceNaoApiKey) }
+    // v0.4：whos.tv 账号草稿，同样跟着已保存的值走，保存/清除后输入框会换成新值。
+    var whosUserDraft by remember(settings.whosTvUsername) { mutableStateOf(settings.whosTvUsername) }
+    var whosPassDraft by remember(settings.whosTvPassword) { mutableStateOf(settings.whosTvPassword) }
+    var showWhosPassword by remember { mutableStateOf(false) }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                text = "SauceNAO 的接口需要免费的 API Key（在 saucenao.com 注册后获取）。" +
-                    "不填也能用 Google Lens / Yandex / ascii2d。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = "SauceNAO 的接口需要免费的 API Key（在 saucenao.com 注册后获取）。" +
+                "不填也能用 Google Lens / Yandex / ascii2d。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
-            OutlinedTextField(
-                value = keyDraft,
-                onValueChange = { keyDraft = it },
-                label = { Text("SauceNAO API Key") },
-                placeholder = { Text("粘贴 saucenao.com 给你的 key") },
-                singleLine = true,
-                visualTransformation = if (showKey) {
-                    VisualTransformation.None
-                } else {
-                    PasswordVisualTransformation()
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
+        OutlinedTextField(
+            value = keyDraft,
+            onValueChange = { keyDraft = it },
+            label = { Text("SauceNAO API Key") },
+            placeholder = { Text("粘贴 saucenao.com 给你的 key") },
+            singleLine = true,
+            visualTransformation = if (showKey) {
+                VisualTransformation.None
+            } else {
+                PasswordVisualTransformation()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(
-                    onClick = { viewModel.setSauceNaoApiKey(keyDraft) },
-                    enabled = keyDraft.trim() != settings.sauceNaoApiKey,
-                ) { Text("保存") }
-                TextButton(onClick = { showKey = !showKey }) {
-                    Text(if (showKey) "隐藏 Key" else "显示 Key")
-                }
-            }
-
-            // 文字按钮：直接跳到 SauceNAO 主页去注册/登录拿 key。
-            TextButton(
-                onClick = {
-                    runCatching {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("https://saucenao.com/")),
-                        )
-                    }
-                },
-            ) { Text("打开 saucenao.com") }
-
-            Text(
-                text = if (settings.sauceNaoApiKey.isEmpty()) {
-                    "当前未配置 SauceNAO Key。"
-                } else {
-                    "当前已配置（" + settings.sauceNaoApiKey.length + " 个字符）。"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (keyDraft.trim() != settings.sauceNaoApiKey) {
-                Text(
-                    text = "有未保存的修改。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.tertiary,
-                )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(
+                onClick = { viewModel.setSauceNaoApiKey(keyDraft) },
+                enabled = keyDraft.trim() != settings.sauceNaoApiKey,
+            ) { Text("保存") }
+            TextButton(onClick = { showKey = !showKey }) {
+                Text(if (showKey) "隐藏 Key" else "显示 Key")
             }
         }
+
+        // 文字按钮：直接跳到 SauceNAO 主页去注册/登录拿 key。
+        TextButton(
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://saucenao.com/")),
+                    )
+                }
+            },
+        ) { Text("打开 saucenao.com") }
+
+        Text(
+            text = if (settings.sauceNaoApiKey.isEmpty()) {
+                "当前未配置 SauceNAO Key。"
+            } else {
+                "当前已配置（" + settings.sauceNaoApiKey.length + " 个字符）。"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (keyDraft.trim() != settings.sauceNaoApiKey) {
+            Text(
+                text = "有未保存的修改。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
+
+        HorizontalDivider()
+
+        // v0.4：whos.tv 账号（积分制，站点在 Cloudflare 后面）。
+        Text(text = "whos.tv 账号", style = MaterialTheme.typography.bodyMedium)
+        OutlinedTextField(
+            value = whosUserDraft,
+            onValueChange = { whosUserDraft = it },
+            label = { Text("用户名") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = whosPassDraft,
+            onValueChange = { whosPassDraft = it },
+            label = { Text("密码") },
+            singleLine = true,
+            visualTransformation = if (showWhosPassword) {
+                VisualTransformation.None
+            } else {
+                PasswordVisualTransformation()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(
+                onClick = { viewModel.setWhosTvAccount(whosUserDraft.trim(), whosPassDraft) },
+                enabled = whosUserDraft.isNotBlank() && whosPassDraft.isNotBlank(),
+            ) { Text("保存账号") }
+            TextButton(onClick = { viewModel.clearWhosTvAccount() }) { Text("清除") }
+            TextButton(onClick = { showWhosPassword = !showWhosPassword }) {
+                Text(if (showWhosPassword) "隐藏密码" else "显示密码")
+            }
+        }
+        Text(
+            text = if (settings.whosTvUsername.isNotBlank() && settings.whosTvPassword.isNotBlank()) {
+                "已配置：" + settings.whosTvUsername
+            } else {
+                "未配置，whos.tv 的识图按钮会提示先去填。"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "whos.tv 不是匿名服务：需要注册账号，每次搜图扣积分（官网每日签到可加）；" +
+                "站点在 Cloudflare 后面，偶尔会被拦住，可到网页手动上传。账号密码只保存在本机 DataStore，不上传。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -297,27 +416,23 @@ private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewMo
  */
 @Composable
 private fun AppearanceCard(settings: AppSettings, viewModel: EropicViewModel) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "主题", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ThemeMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = settings.themeMode == mode,
-                        onClick = { viewModel.setThemeMode(mode) },
-                        label = { Text(mode.label) },
-                    )
-                }
-            }
-
-            SettingSwitchRow(
-                title = "动态取色",
-                subtitle = "用系统壁纸配色（Android 12+）。关闭后使用 Eropic 的紫色主题。",
-                checked = settings.dynamicColor,
-                onCheckedChange = viewModel::setDynamicColor,
+    Text(text = "主题", style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ThemeMode.entries.forEach { mode ->
+            FilterChip(
+                selected = settings.themeMode == mode,
+                onClick = { viewModel.setThemeMode(mode) },
+                label = { Text(mode.label) },
             )
         }
     }
+
+    SettingSwitchRow(
+        title = "动态取色",
+        subtitle = "用系统壁纸配色（Android 12+）。关闭后使用 Eropic 的紫色主题。",
+        checked = settings.dynamicColor,
+        onCheckedChange = viewModel::setDynamicColor,
+    )
 }
 
 @Composable
@@ -326,92 +441,84 @@ private fun ThumbnailCacheCard(
     cacheSizeBytes: Long,
     viewModel: EropicViewModel,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                text = "图库网格改用 320px 小图，滚动更省内存和电。缓存存在应用缓存目录，不会动你的照片；" +
-                    "清空或卸载随时可丢弃，之后会按需重建。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "当前占用 " + formatBytes(cacheSizeBytes),
-                style = MaterialTheme.typography.bodyMedium,
-            )
+    Text(
+        text = "图库网格改用 320px 小图，滚动更省内存和电。缓存存在应用缓存目录，不会动你的照片；" +
+            "清空或卸载随时可丢弃，之后会按需重建。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Text(
+        text = "当前占用 " + formatBytes(cacheSizeBytes),
+        style = MaterialTheme.typography.bodyMedium,
+    )
 
-            SettingSwitchRow(
-                title = "启用缩略图缓存",
-                subtitle = "关闭后网格直接读原图，老照片多时会明显变慢。",
-                checked = settings.thumbnailCacheEnabled,
-                onCheckedChange = viewModel::setThumbnailCacheEnabled,
-            )
+    SettingSwitchRow(
+        title = "启用缩略图缓存",
+        subtitle = "关闭后网格直接读原图，老照片多时会明显变慢。",
+        checked = settings.thumbnailCacheEnabled,
+        onCheckedChange = viewModel::setThumbnailCacheEnabled,
+    )
 
-            Text(text = "缓存上限", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(512, 1024, 2048).forEach { mb ->
-                    FilterChip(
-                        selected = settings.thumbnailCacheMb == mb,
-                        onClick = { viewModel.setThumbnailCacheMb(mb) },
-                        label = { Text(if (mb >= 1024) (mb / 1024).toString() + " GB" else mb.toString() + " MB") },
-                    )
-                }
-            }
-            Text(
-                text = "超出上限时自动删除最久没用的缓存。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    Text(text = "缓存上限", style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(512, 1024, 2048).forEach { mb ->
+            FilterChip(
+                selected = settings.thumbnailCacheMb == mb,
+                onClick = { viewModel.setThumbnailCacheMb(mb) },
+                label = { Text(if (mb >= 1024) (mb / 1024).toString() + " GB" else mb.toString() + " MB") },
             )
-
-            var confirmClear by remember { mutableStateOf(false) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { confirmClear = true }) { Text("清空缓存") }
-                OutlinedButton(onClick = viewModel::backfillThumbnails) { Text("充电时补齐") }
-            }
-            if (confirmClear) {
-                AlertDialog(
-                    onDismissRequest = { confirmClear = false },
-                    title = { Text("清空缩略图缓存？") },
-                    text = { Text("只删除 cacheDir/thumbs 里的缩略图文件，不会动任何照片；下次浏览会按需重新生成，首屏会略慢。") },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            confirmClear = false
-                            viewModel.clearThumbnailCache()
-                        }) { Text("清空") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { confirmClear = false }) { Text("取消") }
-                    },
-                )
-            }
         }
+    }
+    Text(
+        text = "超出上限时自动删除最久没用的缓存。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    var confirmClear by remember { mutableStateOf(false) }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = { confirmClear = true }) { Text("清空缓存") }
+        OutlinedButton(onClick = viewModel::backfillThumbnails) { Text("充电时补齐") }
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("清空缩略图缓存？") },
+            text = { Text("只删除 cacheDir/thumbs 里的缩略图文件，不会动任何照片；下次浏览会按需重新生成，首屏会略慢。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClear = false
+                    viewModel.clearThumbnailCache()
+                }) { Text("清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) { Text("取消") }
+            },
+        )
     }
 }
 
 @Composable
 private fun BackgroundCard(settings: AppSettings, viewModel: EropicViewModel) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                text = "计算指纹、查重是重活，只在你在应用内点「开始」或自动续算时跑，不会常驻后台。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    Text(
+        text = "计算指纹、查重是重活，只在你在应用内点「开始」或自动续算时跑，不会常驻后台。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 
-            SettingSwitchRow(
-                title = "仅充电时补齐缩略图",
-                subtitle = "关闭后未充电也会在后台补齐缩略图缓存，耗电与发热会略高。",
-                checked = settings.thumbnailBackfillChargingOnly,
-                onCheckedChange = viewModel::setThumbnailBackfillChargingOnly,
-            )
+    SettingSwitchRow(
+        title = "仅充电时补齐缩略图",
+        subtitle = "关闭后未充电也会在后台补齐缩略图缓存，耗电与发热会略高。",
+        checked = settings.thumbnailBackfillChargingOnly,
+        onCheckedChange = viewModel::setThumbnailBackfillChargingOnly,
+    )
 
-            SettingSwitchRow(
-                title = "启动时自动续算中断的索引",
-                subtitle = "上次算到一半被系统杀掉时，下次打开应用自动接着算；关闭后只在你手动点「开始」时继续。",
-                checked = settings.autoResumeIndex,
-                onCheckedChange = viewModel::setAutoResumeIndex,
-            )
-        }
-    }
+    SettingSwitchRow(
+        title = "启动时自动续算中断的索引",
+        subtitle = "上次算到一半被系统杀掉时，下次打开应用自动接着算；关闭后只在你手动点「开始」时继续。",
+        checked = settings.autoResumeIndex,
+        onCheckedChange = viewModel::setAutoResumeIndex,
+    )
 }
 
 /**
@@ -425,24 +532,28 @@ private fun StorageAccessCard(
     hasWriteAccess: Boolean,
     onOpenPermission: () -> Unit,
 ) {
-    Card(onClick = onOpenPermission, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                text = if (hasWriteAccess) {
-                    "已授予「所有文件访问」：可以真实移动文件、把图片移入 Eropic 回收站并恢复。";
-                } else {
-                    "浏览与查重不需要这个权限。只有真实移动、移入回收站/恢复/彻底删除才需要它；" +
-                        "未授权时这些入口会置灰，其他功能不受影响。";
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "状态：" + if (hasWriteAccess) "已授予" else "未授予",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            OutlinedButton(onClick = onOpenPermission) { Text("权限说明与设置") }
-        }
+    // 整块可点：保留原来「点权限区任意位置都进权限说明页」的行为，但不再套一层卡片。
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpenPermission),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = if (hasWriteAccess) {
+                "已授予「所有文件访问」：可以真实移动文件、把图片移入 Eropic 回收站并恢复。"
+            } else {
+                "浏览与查重不需要这个权限。只有真实移动、移入回收站/恢复/彻底删除才需要它；" +
+                    "未授权时这些入口会置灰，其他功能不受影响。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "状态：" + if (hasWriteAccess) "已授予" else "未授予",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        OutlinedButton(onClick = onOpenPermission) { Text("权限说明与设置") }
     }
 }
 
@@ -477,82 +588,78 @@ private fun SettingSwitchRow(
 private fun GalleryViewCard(settings: AppSettings, viewModel: EropicViewModel) {
     var sortMenuOpen by remember { mutableStateOf(false) }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "每行显示", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                (3..6).forEach { columns ->
-                    FilterChip(
-                        selected = settings.gridColumns == columns,
-                        onClick = { viewModel.setGridColumns(columns) },
-                        label = { Text(columns.toString() + " 列") },
-                    )
-                }
-            }
-
-            SettingSwitchRow(
-                title = "显示张数与总大小",
-                subtitle = "标题栏副标题是否显示「N 张 · X GB」。",
-                checked = settings.showMeta,
-                onCheckedChange = viewModel::setShowMeta,
-            )
-
-            Text(text = "默认排序", style = MaterialTheme.typography.labelLarge)
-            Box {
-                OutlinedButton(onClick = { sortMenuOpen = true }) {
-                    Text(settings.defaultSort.label)
-                }
-                DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
-                    SortOrder.entries.forEach { order ->
-                        DropdownMenuItem(
-                            text = { Text(order.label) },
-                            onClick = {
-                                viewModel.setDefaultSort(order)
-                                sortMenuOpen = false
-                            },
-                            trailingIcon = {
-                                if (settings.defaultSort == order) {
-                                    Icon(imageVector = Icons.Filled.Check, contentDescription = null)
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-
-            Text(text = "日期分组", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DateGroupMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = settings.dateGroupMode == mode,
-                        onClick = { viewModel.setDateGroupMode(mode) },
-                        label = { Text(mode.label) },
-                    )
-                }
-            }
-            Text(
-                text = "按月/按日会在图库里插入分组标题；不分组是一整块时间线。双指捏合仍可临时改列数。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Text(text = "幻灯片间隔", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(2, 3, 5, 8).forEach { seconds ->
-                    FilterChip(
-                        selected = settings.slideshowIntervalSec == seconds,
-                        onClick = { viewModel.setSlideshowInterval(seconds) },
-                        label = { Text(seconds.toString() + " 秒") },
-                    )
-                }
-            }
-            Text(
-                text = "查看器里点「幻灯片」按此间隔自动翻页，点屏幕任意位置停止。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    Text(text = "每行显示", style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        (3..6).forEach { columns ->
+            FilterChip(
+                selected = settings.gridColumns == columns,
+                onClick = { viewModel.setGridColumns(columns) },
+                label = { Text(columns.toString() + " 列") },
             )
         }
     }
+
+    SettingSwitchRow(
+        title = "显示张数与总大小",
+        subtitle = "标题栏副标题是否显示「N 张 · X GB」。",
+        checked = settings.showMeta,
+        onCheckedChange = viewModel::setShowMeta,
+    )
+
+    Text(text = "默认排序", style = MaterialTheme.typography.labelLarge)
+    Box {
+        OutlinedButton(onClick = { sortMenuOpen = true }) {
+            Text(settings.defaultSort.label)
+        }
+        DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+            SortOrder.entries.forEach { order ->
+                DropdownMenuItem(
+                    text = { Text(order.label) },
+                    onClick = {
+                        viewModel.setDefaultSort(order)
+                        sortMenuOpen = false
+                    },
+                    trailingIcon = {
+                        if (settings.defaultSort == order) {
+                            Icon(imageVector = Icons.Filled.Check, contentDescription = null)
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    Text(text = "日期分组", style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DateGroupMode.entries.forEach { mode ->
+            FilterChip(
+                selected = settings.dateGroupMode == mode,
+                onClick = { viewModel.setDateGroupMode(mode) },
+                label = { Text(mode.label) },
+            )
+        }
+    }
+    Text(
+        text = "按月/按日会在图库里插入分组标题；不分组是一整块时间线。双指捏合仍可临时改列数。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    Text(text = "幻灯片间隔", style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(2, 3, 5, 8).forEach { seconds ->
+            FilterChip(
+                selected = settings.slideshowIntervalSec == seconds,
+                onClick = { viewModel.setSlideshowInterval(seconds) },
+                label = { Text(seconds.toString() + " 秒") },
+            )
+        }
+    }
+    Text(
+        text = "查看器里点「幻灯片」按此间隔自动翻页，点屏幕任意位置停止。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /**
@@ -560,42 +667,37 @@ private fun GalleryViewCard(settings: AppSettings, viewModel: EropicViewModel) {
  */
 @Composable
 private fun CleanupSettingsCard(settings: AppSettings, viewModel: EropicViewModel) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-
-            Text(text = "回收站保留时长", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                RetentionOption.entries.forEach { option ->
-                    FilterChip(
-                        selected = settings.retention == option,
-                        onClick = { viewModel.setRetention(option) },
-                        label = { Text(option.label) },
-                    )
-                }
-            }
-            Text(
-                text = "到期后会提示你清理，不会静默删除；「永久保留」则一直留着直到你手动清空。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Text(text = "相似判定档位", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SimilarityLevel.entries.forEach { level ->
-                    FilterChip(
-                        selected = settings.similarity == level,
-                        onClick = { viewModel.setSimilarity(level) },
-                        label = { Text(level.label) },
-                    )
-                }
-            }
-            Text(
-                text = "档位越宽松，判为相似的阈值越低、误报越多；改完需重新扫描相似分组才生效。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    Text(text = "回收站保留时长", style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        RetentionOption.entries.forEach { option ->
+            FilterChip(
+                selected = settings.retention == option,
+                onClick = { viewModel.setRetention(option) },
+                label = { Text(option.label) },
             )
         }
     }
+    Text(
+        text = "到期后会提示你清理，不会静默删除；「永久保留」则一直留着直到你手动清空。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    Text(text = "相似判定档位", style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        SimilarityLevel.entries.forEach { level ->
+            FilterChip(
+                selected = settings.similarity == level,
+                onClick = { viewModel.setSimilarity(level) },
+                label = { Text(level.label) },
+            )
+        }
+    }
+    Text(
+        text = "档位越宽松，判为相似的阈值越低、误报越多；改完需重新扫描相似分组才生效。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /**
@@ -619,67 +721,62 @@ private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
         }
     }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    SettingSwitchRow(
+        title = "包含隐藏目录",
+        subtitle = "以 . 开头的目录（如缓存、缩略图目录）默认不索引。打开后可能会看到大量废图。",
+        checked = settings.scanIncludeHidden,
+        onCheckedChange = viewModel::setScanIncludeHidden,
+    )
 
-            SettingSwitchRow(
-                title = "包含隐藏目录",
-                subtitle = "以 . 开头的目录（如缓存、缩略图目录）默认不索引。打开后可能会看到大量废图。",
-                checked = settings.scanIncludeHidden,
-                onCheckedChange = viewModel::setScanIncludeHidden,
-            )
-
-            Text(text = "排除目录", style = MaterialTheme.typography.labelLarge)
-            if (settings.scanExcludedDirs.isEmpty()) {
-                Text(
-                    text = "没有排除目录。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                settings.scanExcludedDirs.forEach { dir ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(text = dir, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { viewModel.removeScanExcludedDir(dir) }) { Text("移除") }
-                    }
-                }
-            }
-
+    Text(text = "排除目录", style = MaterialTheme.typography.labelLarge)
+    if (settings.scanExcludedDirs.isEmpty()) {
+        Text(
+            text = "没有排除目录。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        settings.scanExcludedDirs.forEach { dir ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    label = { Text("如 DCIM/Screenshots") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(
-                    enabled = draft.isNotBlank(),
-                    onClick = {
-                        viewModel.addScanExcludedDir(draft)
-                        draft = ""
-                    },
-                ) { Text("添加") }
+                Text(text = dir, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                TextButton(onClick = { viewModel.removeScanExcludedDir(dir) }) { Text("移除") }
             }
-            // 手动输入容易敲错，给一个走系统文件选择器的入口；选完仍会存成相对路径。
-            OutlinedButton(onClick = { browseLauncher.launch(null) }) {
-                Text("浏览选择目录…")
-            }
-            Text(
-                text = "目录用相对路径（相对存储根）。改完在下次「增量扫描」生效，已索引的行不会自动移除。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            value = draft,
+            onValueChange = { draft = it },
+            label = { Text("如 DCIM/Screenshots") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            enabled = draft.isNotBlank(),
+            onClick = {
+                viewModel.addScanExcludedDir(draft)
+                draft = ""
+            },
+        ) { Text("添加") }
+    }
+    // 手动输入容易敲错，给一个走系统文件选择器的入口；选完仍会存成相对路径。
+    OutlinedButton(onClick = { browseLauncher.launch(null) }) {
+        Text("浏览选择目录…")
+    }
+    Text(
+        text = "目录用相对路径（相对存储根）。改完在下次「增量扫描」生效，已索引的行不会自动移除。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /**
@@ -687,45 +784,41 @@ private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
  */
 @Composable
 private fun MorePagesCard(viewModel: EropicViewModel) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { viewModel.openScreen(AppScreen.Search) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("搜索") }
-                OutlinedButton(
-                    onClick = { viewModel.openScreen(AppScreen.Storage) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("存储总览") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { viewModel.openScreen(AppScreen.History) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("操作历史") }
-                OutlinedButton(
-                    onClick = { viewModel.openScreen(AppScreen.FolderManager) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("文件夹管理") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { viewModel.openScreen(AppScreen.CleanupReport) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("清理报告") }
-                OutlinedButton(
-                    onClick = { viewModel.openScreen(AppScreen.ImageFind) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("识图") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { viewModel.openScreen(AppScreen.About) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("关于") }
-            }
-        }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = { viewModel.openScreen(AppScreen.Search) },
+            modifier = Modifier.weight(1f),
+        ) { Text("搜索") }
+        OutlinedButton(
+            onClick = { viewModel.openScreen(AppScreen.Storage) },
+            modifier = Modifier.weight(1f),
+        ) { Text("存储总览") }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = { viewModel.openScreen(AppScreen.History) },
+            modifier = Modifier.weight(1f),
+        ) { Text("操作历史") }
+        OutlinedButton(
+            onClick = { viewModel.openScreen(AppScreen.FolderManager) },
+            modifier = Modifier.weight(1f),
+        ) { Text("文件夹管理") }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = { viewModel.openScreen(AppScreen.CleanupReport) },
+            modifier = Modifier.weight(1f),
+        ) { Text("清理报告") }
+        OutlinedButton(
+            onClick = { viewModel.openScreen(AppScreen.ImageFind) },
+            modifier = Modifier.weight(1f),
+        ) { Text("识图") }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = { viewModel.openScreen(AppScreen.About) },
+            modifier = Modifier.weight(1f),
+        ) { Text("关于") }
     }
 }
 

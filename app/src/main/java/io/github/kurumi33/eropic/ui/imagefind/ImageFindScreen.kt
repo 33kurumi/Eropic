@@ -9,6 +9,9 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,12 +35,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.Language
-import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.SearchOff
 import androidx.compose.material3.AlertDialog
@@ -63,11 +66,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -98,15 +103,24 @@ private const val DHASH_MAX_DISTANCE = 16
 /** 顶部两个 Tab：两块功能各自独立，共用同一张源图。 */
 private val FIND_TABS: List<String> = listOf("本地识图", "联网识图")
 
+/** 结果网格捏合列数的下限：识图结果是大图，2 列也有意义（图库网格最低 3 列）。 */
+private const val MIN_FIND_COLUMNS = 2
+
+/** 捏合列数上限，与设置里的网格列数上限（8）保持一致。 */
+private const val MAX_FIND_COLUMNS = 8
+
 /**
- * 联网识图只保留这 4 家：Google Lens / Yandex / SauceNAO / ascii2d。
+ * 联网识图固定这 6 家（顺序即按钮顺序）：Google Lens / Yandex / 百度识图 / SauceNAO / ascii2d / whos.tv。
+ * 百度识图是国内唯一能直连的一家，放在第三位当兜底；whos.tv 需要账号和积分，放最后。
  * 这里显式列出来而不是用 ReverseImageProvider.entries，方便以后枚举里再增删而不影响界面顺序。
  */
 private val ONLINE_PROVIDERS: List<ReverseImageProvider> = listOf(
     ReverseImageProvider.GOOGLE_LENS,
     ReverseImageProvider.YANDEX,
+    ReverseImageProvider.BAIDU,
     ReverseImageProvider.SAUCENAO,
     ReverseImageProvider.ASCII2D,
+    ReverseImageProvider.WHOSTV,
 )
 
 /**
@@ -179,6 +193,12 @@ fun ImageFindScreen(
     var showSauceNaoDialog by remember { mutableStateOf(false) }
     // 0 = 本地识图，1 = 联网识图。
     var selectedTab by remember { mutableStateOf(0) }
+    // 双指捏合临时改的列数：只影响本次浏览，不回写设置，离开页面就恢复。
+    var columnOverride by remember { mutableStateOf<Int?>(null) }
+    // 识图结果是大图，2 列也有意义，所以下限用 2。
+    val columns = (columnOverride ?: settings.gridColumns).coerceIn(MIN_FIND_COLUMNS, MAX_FIND_COLUMNS)
+    // 设置里改了列数就丢掉本页的临时覆盖，否则会看起来「设置没生效」。
+    LaunchedEffect(settings.gridColumns) { columnOverride = null }
 
     // 同步到会话对象，保证从查看器返回（本页被销毁重组）后还能接着看结果。
     LaunchedEffect(source) { ImageFindSession.source = source }
@@ -256,6 +276,11 @@ fun ImageFindScreen(
         // SauceNAO 需要 API Key：没配置时直接引导去设置/官网，而不是等上传失败再报「暂未支持」。
         if (provider == ReverseImageProvider.SAUCENAO && !viewModel.sauceNaoApiKeyConfigured()) {
             showSauceNaoDialog = true
+            return
+        }
+        // whos.tv 要登录且每次搜索扣积分：没配账号时不发请求，先引导去设置里填账号。
+        if (provider == ReverseImageProvider.WHOSTV && !viewModel.whosTvAccountConfigured()) {
+            viewModel.postMessage("whos.tv 需要账号：请到 设置 → 联网识图 填用户名与密码（搜图会扣积分）")
             return
         }
         onlineLoading = provider
@@ -382,7 +407,8 @@ fun ImageFindScreen(
                         modifier = Modifier.weight(1f),
                         hits = hits,
                         searching = searching,
-                        columns = settings.gridColumns,
+                        columns = columns,
+                        onColumnsChange = { columnOverride = it },
                         thumbnailsEnabled = settings.thumbnailCacheEnabled,
                         thumbnailProvider = hitThumbnail,
                         keywordInput = keywordInput,
@@ -399,6 +425,7 @@ fun ImageFindScreen(
                         onlineLoading = onlineLoading,
                         notice = onlineNotice,
                         sauceNaoConfigured = viewModel.sauceNaoApiKeyConfigured(),
+                        whosTvConfigured = viewModel.whosTvAccountConfigured(),
                         onSearch = { provider -> launchOnlineSearch(provider) },
                         onOpenHome = { provider -> openProviderHome(provider) },
                     )
@@ -426,6 +453,7 @@ private fun LocalFindTab(
     hits: List<SimilarImageHit>,
     searching: Boolean,
     columns: Int,
+    onColumnsChange: (Int) -> Unit,
     thumbnailsEnabled: Boolean,
     thumbnailProvider: suspend (Long) -> File?,
     keywordInput: String,
@@ -454,6 +482,15 @@ private fun LocalFindTab(
             keyboardActions = KeyboardActions(onSearch = { onKeywordSubmit() }),
         )
 
+        // 与 core/search 里 SimilarityMath.matchesKeyword 的实际行为逐字对应：不区分大小写、
+        // 按子串匹配（所以 cat 会命中 vacation.jpg）、空格不切词、% 与 _ 都不当通配符。
+        Text(
+            text = "语法：同时匹配文件名与目录路径 · 不区分大小写 · 按子串匹配（输入 cat 会命中 vacation.jpg）· 空格算关键词的一部分 · % 和 _ 按普通字符处理",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+
         Box(modifier = Modifier.weight(1f)) {
             when {
                 hits.isEmpty() && searching -> FindingState()
@@ -471,6 +508,7 @@ private fun LocalFindTab(
                     SimilarHitsGrid(
                         hits = hits,
                         columns = columns,
+                        onColumnsChange = onColumnsChange,
                         thumbnailsEnabled = thumbnailsEnabled,
                         thumbnailProvider = thumbnailProvider,
                         onOpen = onOpenViewer,
@@ -654,13 +692,14 @@ private fun SourceSummary(
 /** 联网识图最近一次的结果提示：成功用主色，失败用错误色。 */
 private data class OnlineNotice(val ok: Boolean, val text: String)
 
-/** 「联网识图」Tab：4 个服务商按钮 + 最近一次结果提示；整块独立滚动。 */
+/** 「联网识图」Tab：6 个服务商按钮 + 最近一次结果提示；整块独立滚动。 */
 @Composable
 private fun OnlineFindTab(
     modifier: Modifier = Modifier,
     onlineLoading: ReverseImageProvider?,
     notice: OnlineNotice?,
     sauceNaoConfigured: Boolean,
+    whosTvConfigured: Boolean,
     onSearch: (ReverseImageProvider) -> Unit,
     onOpenHome: (ReverseImageProvider) -> Unit,
 ) {
@@ -685,6 +724,12 @@ private fun OnlineFindTab(
         }
         Text(
             text = "把当前源图上传到服务商，在浏览器里看结果。上传意味着这张图会离开本机。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Text(
+            text = "除百度识图外，这些网站通常需要代理（Clash 等）才能连上；百度识图国内直连。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp),
@@ -722,19 +767,45 @@ private fun OnlineFindTab(
                 provider = provider,
                 enabled = onlineLoading == null,
                 loading = onlineLoading == provider,
-                needsKey = provider == ReverseImageProvider.SAUCENAO && !sauceNaoConfigured,
+                hint = providerHint(provider, sauceNaoConfigured, whosTvConfigured),
+                setupLabel = providerSetupLabel(provider, sauceNaoConfigured, whosTvConfigured),
                 onSearch = { onSearch(provider) },
                 onOpenHome = { onOpenHome(provider) },
             )
         }
 
         Text(
-            text = "识别不出结果时，可以点「官网」手动上传原图再试；SauceNAO 需要先在「设置 → 联网识图」填 API Key。",
+            text = "识别不出结果时，可以点「官网」手动上传原图再试。SauceNAO 需要先在「设置 → 联网识图」填 API Key；whos.tv 需要账号 + 积分（每次搜索会扣积分）。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 14.dp),
         )
     }
+}
+
+/** 每个服务商的状态说明：只描述当前条件，按钮是否可点由 [ProviderRow] 里单独的 loading 决定。 */
+private fun providerHint(
+    provider: ReverseImageProvider,
+    sauceNaoConfigured: Boolean,
+    whosTvConfigured: Boolean,
+): String = when {
+    provider == ReverseImageProvider.SAUCENAO && !sauceNaoConfigured -> "需要 API Key（免费注册）"
+    provider == ReverseImageProvider.WHOSTV && !whosTvConfigured -> "需要 whos.tv 账号（设置 → 联网识图 填）"
+    // 已配好账号时也要提醒：whos.tv 不是免费无限查，每次搜图会扣积分。
+    provider == ReverseImageProvider.WHOSTV -> "whos.tv 每次搜索扣积分（官网签到可加）"
+    provider == ReverseImageProvider.BAIDU -> "国内可直连，不用代理"
+    else -> "上传这张图，在浏览器看结果"
+}
+
+/** 需要先去设置里补配置时，按钮上显示的动作文案；null 表示条件已就绪，可以直接识图。 */
+private fun providerSetupLabel(
+    provider: ReverseImageProvider,
+    sauceNaoConfigured: Boolean,
+    whosTvConfigured: Boolean,
+): String? = when {
+    provider == ReverseImageProvider.SAUCENAO && !sauceNaoConfigured -> "填 Key"
+    provider == ReverseImageProvider.WHOSTV && !whosTvConfigured -> "填账号"
+    else -> null
 }
 
 /** 单个服务商：名称 + 状态说明 + 「官网」兜底入口 + 识图按钮。 */
@@ -743,7 +814,8 @@ private fun ProviderRow(
     provider: ReverseImageProvider,
     enabled: Boolean,
     loading: Boolean,
-    needsKey: Boolean,
+    hint: String,
+    setupLabel: String?,
     onSearch: () -> Unit,
     onOpenHome: () -> Unit,
 ) {
@@ -761,11 +833,7 @@ private fun ProviderRow(
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = provider.label, style = MaterialTheme.typography.titleSmall)
                 Text(
-                    text = when {
-                        needsKey -> "需要 API Key（免费注册）"
-                        loading -> "正在上传…"
-                        else -> "上传这张图，在浏览器看结果"
-                    },
+                    text = if (loading) "正在上传…" else hint,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -774,7 +842,7 @@ private fun ProviderRow(
             }
             TextButton(onClick = onOpenHome, enabled = !loading) {
                 Icon(
-                    imageVector = Icons.Outlined.OpenInNew,
+                    imageVector = Icons.AutoMirrored.Outlined.OpenInNew,
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                 )
@@ -786,7 +854,7 @@ private fun ProviderRow(
                 if (loading) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 } else {
-                    Text(if (needsKey) "填 Key" else "识图")
+                    Text(setupLabel ?: "识图")
                 }
             }
         }
@@ -814,18 +882,24 @@ private fun SauceNaoKeyDialog(
     )
 }
 
-/** 结果网格：点击任意结果打开查看器，并带上整个结果集的 id，方便左右翻看。 */
+/**
+ * 结果网格：点击任意结果打开查看器，并带上整个结果集的 id，方便左右翻看。
+ * 支持双指捏合临时改列数（2..8），只影响本次浏览，不同步到设置。
+ */
 @Composable
 private fun SimilarHitsGrid(
     hits: List<SimilarImageHit>,
     columns: Int,
+    onColumnsChange: (Int) -> Unit,
     thumbnailsEnabled: Boolean,
     thumbnailProvider: suspend (Long) -> File?,
     onOpen: (List<Long>, Int) -> Unit,
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .pinchToChangeColumns(columns, MIN_FIND_COLUMNS, MAX_FIND_COLUMNS, onColumnsChange),
         contentPadding = PaddingValues(2.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -1011,6 +1085,50 @@ private fun EmptyResultState(onReselect: () -> Unit) {
         )
         TextButton(onClick = onReselect, modifier = Modifier.padding(top = 8.dp)) {
             Text("换一张源图")
+        }
+    }
+}
+
+/**
+ * 双指捏合切换网格列数（复制自 ui/components/MediaGrid.kt，只把上下限改成参数）。
+ *
+ * 只观察、不消费触摸事件：单指滑动仍然交给 LazyVerticalGrid 自己滚动，
+ * 只有真的检测到双指缩放累积超过阈值时才回调一次，避免翻一张图就把列数跳乱。
+ */
+@Composable
+private fun Modifier.pinchToChangeColumns(
+    columns: Int,
+    minColumns: Int,
+    maxColumns: Int,
+    onColumnsChange: (Int) -> Unit,
+): Modifier {
+    val latestColumns = rememberUpdatedState(columns)
+    val latestOnChange = rememberUpdatedState(onColumnsChange)
+    return pointerInput(Unit) {
+        var accumulated = 1f
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false)
+            do {
+                val event = awaitPointerEvent()
+                val pressedCount = event.changes.count { it.pressed }
+                if (pressedCount >= 2) {
+                    val zoom = event.calculateZoom()
+                    if (zoom.isFinite() && zoom > 0f && zoom != 1f) {
+                        accumulated *= zoom
+                        val current = latestColumns.value
+                        if (accumulated > 1.3f && current > minColumns) {
+                            latestOnChange.value(current - 1)
+                            accumulated = 1f
+                        } else if (accumulated < 0.7f && current < maxColumns) {
+                            latestOnChange.value(current + 1)
+                            accumulated = 1f
+                        }
+                    }
+                } else {
+                    // 手指减少时重置累积，避免一次捏合被算成连续多次。
+                    accumulated = 1f
+                }
+            } while (event.changes.any { it.pressed })
         }
     }
 }

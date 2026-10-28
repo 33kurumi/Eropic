@@ -34,6 +34,8 @@ class SettingsRepository(private val context: Context) {
         val SCAN_INCLUDE_HIDDEN = booleanPreferencesKey("scan_include_hidden")
         val SCAN_EXCLUDED_DIRS = stringPreferencesKey("scan_excluded_dirs")
         val SAUCE_NAO_API_KEY = stringPreferencesKey("sauce_nao_api_key")
+        val WHOS_TV_USERNAME = stringPreferencesKey("whos_tv_username")
+        val WHOS_TV_PASSWORD = stringPreferencesKey("whos_tv_password")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { prefs ->
@@ -60,6 +62,8 @@ class SettingsRepository(private val context: Context) {
             scanIncludeHidden = prefs[Keys.SCAN_INCLUDE_HIDDEN] ?: defaults.scanIncludeHidden,
             scanExcludedDirs = parseDirs(prefs[Keys.SCAN_EXCLUDED_DIRS]),
             sauceNaoApiKey = prefs[Keys.SAUCE_NAO_API_KEY] ?: defaults.sauceNaoApiKey,
+            whosTvUsername = prefs[Keys.WHOS_TV_USERNAME] ?: defaults.whosTvUsername,
+            whosTvPassword = prefs[Keys.WHOS_TV_PASSWORD] ?: defaults.whosTvPassword,
         )
     }
 
@@ -119,6 +123,25 @@ class SettingsRepository(private val context: Context) {
     /** v0.3：SauceNAO API Key（去掉首尾空白；空串表示未配置）。 */
     suspend fun setSauceNaoApiKey(raw: String) =
         context.settingsDataStore.edit { it[Keys.SAUCE_NAO_API_KEY] = raw.trim() }
+
+    /**
+     * v0.4：whos.tv 账号。
+     *
+     * 用户名 trim、密码保留原样（密码里的空格可能是有效字符）；
+     * 两者都为空时视为「退出登录」，等价于清空凭据。
+     */
+    suspend fun setWhosTvAccount(username: String, password: String) =
+        context.settingsDataStore.edit {
+            it[Keys.WHOS_TV_USERNAME] = username.trim()
+            it[Keys.WHOS_TV_PASSWORD] = password
+        }
+
+    /** 清空 whos.tv 凭据（登出）。 */
+    suspend fun clearWhosTvAccount() =
+        context.settingsDataStore.edit {
+            it.remove(Keys.WHOS_TV_USERNAME)
+            it.remove(Keys.WHOS_TV_PASSWORD)
+        }
 
     suspend fun setScanIncludeHidden(enabled: Boolean) =
         context.settingsDataStore.edit { it[Keys.SCAN_INCLUDE_HIDDEN] = enabled }
