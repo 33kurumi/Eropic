@@ -82,16 +82,18 @@ class OnlineImageSearch(
     /**
      * Google Lens。
      *
-     * 端点（非官方，随时可能失效）：POST https://lens.google.com/v3/upload?stcs=<毫秒时间戳>&hl=zh-CN
+     * 端点（非官方，随时可能失效）：POST https://lens.google.com/v3/upload?stcs=<毫秒时间戳>
      * 表单字段：encoded_image = 图片文件（multipart/form-data，字段名固定）
      * 结果 URL：服务端 303 跳到 https://lens.google.com/search?...，跟随重定向后取最终请求 URL；
      *           少数情况下返回一个中转页，再从 HTML 里抓 lens.google.com/search 链接兜底。
+     *
+     * 2026-10-28 对照 PicImageSearch（kitUIN/PicImageSearch，engines/google_lens.py）修正：
+     * 上传请求**不能带 hl 参数**，否则 Lens 直接返回 403；stcs 是 ShareX 这类客户端习惯带的时间戳，保留无碍。
      */
     private fun googleLens(bytes: ByteArray, mime: String): OnlineSearchResult {
         val url = UPLOAD_URL_GOOGLE_LENS.toHttpUrlOrNull()
             ?.newBuilder()
             ?.addQueryParameter("stcs", System.currentTimeMillis().toString())
-            ?.addQueryParameter("hl", "zh-CN")
             ?.build()
             ?: return failed(ReverseImageProvider.GOOGLE_LENS, "内部错误：上传地址拼装失败")
         val body = MultipartBody.Builder()
@@ -266,7 +268,9 @@ class OnlineImageSearch(
             .build()
         post(url, body).use { response ->
             val finalUrl = response.request.url.toString()
-            return if (finalUrl.contains("uri=")) {
+            // 结果页形如 https://ascii2d.net/search/color/<hash>（特征检索是 /search/bovw/<hash>），
+            // 只有提交失败时才会停在 /search/file 上；2026-10-28 对照 PicImageSearch 的实现确认这一点。
+            return if (finalUrl.contains("/search/color") || finalUrl.contains("/search/bovw") || finalUrl.contains("uri=")) {
                 OnlineSearchResult(provider = ReverseImageProvider.ASCII2D, ok = true, resultUrl = finalUrl)
             } else {
                 failed(

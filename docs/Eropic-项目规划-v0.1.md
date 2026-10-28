@@ -87,7 +87,7 @@
 | **digiKam**（开源，桌面） | 桌面照片管理 | Haar 小波指纹做相似检测；Find Duplicates 可限定相册/标签缩小范围；保留策略（更旧/更大/指定相册）；SQLite 默认 | 桌面端 |
 | **czkawka**（Rust，开源） | 桌面重复清理 | 重复/相似图片算法（size → 预哈希 → 全哈希）、大文件扫描、性能经验 | 桌面端，无移动端体验 |
 
-**开源现状**：没有"相册 + 去重 + 真实移动 + 回收站"四合一项目。**ReFra**（Kotlin Compose，~2.9k★，活跃）可作 Compose 壳参考，**Fossify** 适合抄回收站/文件操作，**Aves** 抄信息架构；但注意这些项目多为 GPL/AGPL（Immich、PhotoPrism 为 AGPL，Aves、Fossify 为 GPL），**闭源分发只能参考交互与架构，不能直接复制代码**。
+**开源现状**：没有"相册 + 去重 + 真实移动 + 回收站"四合一项目。**ReFra**（Kotlin Compose，~2.9k★，活跃）可作 Compose 壳参考，**Fossify** 适合抄回收站/文件操作，**Aves** 抄信息架构；但注意许可证各不相同（2026-10-28 经 GitHub API 逐一核对：Immich、PhotoPrism 为 AGPL-3.0；Fossify Gallery 为 GPL-3.0；Aves 为 BSD-3-Clause；ReFra 为 Apache-2.0），**分发或商用前要看具体许可证，宽松许可证（BSD/Apache）也不能照抄交互细节之外的设计资产**。
 
 ### 2.2 功能对照表
 
@@ -129,7 +129,7 @@
 7. **批量操作借鉴 Fossify 并加"撤销"**：所有写操作先写 `operation_log` 可一键回滚；确认页固定显示"N 张 · X GB · 30 天内可恢复"。
 8. **存储总览借鉴 Google**：分类卡 + "可释放空间"**只统计确定冗余**（精确重复、已备份副本、已勾选清理项），不虚报；本地为主的场景下，"释放"一律先"移入回收站"。
 9. **明确不做**：v1 端侧 CLIP（模型体积/耗电/收益比低）、任何自动删除、云端对比；语义搜索留 P2。
-10. **许可提醒**：Immich / PhotoPrism 为 AGPL，Aves / Fossify / ReFra 为 GPL —— **闭源分发只能参考交互与架构，不能直接复制代码**；真要复用需评估开源义务。
+10. **许可提醒**（2026-10-28 核对）：Immich / PhotoPrism 为 AGPL-3.0，Fossify Gallery 为 GPL-3.0，Aves 为 BSD-3-Clause，ReFra 为 Apache-2.0 —— 前两者与 GPL 项在分发时带传染性义务，BSD/Apache 项义务较轻但仍需署名；**统一原则：只参考交互与架构，不复制代码**。
 
 ---
 
