@@ -1,6 +1,5 @@
 package io.github.kurumi33.eropic.ui.gallery
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,26 +11,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
-import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -52,6 +48,7 @@ import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.settings.DateGroupMode
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
@@ -61,7 +58,6 @@ import io.github.kurumi33.eropic.ui.trash.MoveDialog
 import io.github.kurumi33.eropic.ui.permission.MediaAccess
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GalleryScreen(
     viewModel: EropicViewModel,
@@ -132,26 +128,15 @@ fun GalleryScreen(
                 hasWriteAccess = hasWriteAccess,
             )
         } else {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("图库")
-                        if (settings.showMeta) {
-                            Text(
-                                text = formatCount(count) + " 张 · " + formatBytes(totalSize),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
+            EropicTopBar(
+                title = "图库",
+                subtitle = if (settings.showMeta) {
+                    formatCount(count) + " 张 · " + formatBytes(totalSize)
+                } else {
+                    null
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.setShowMeta(!settings.showMeta) }) {
-                        Icon(
-                            imageVector = if (settings.showMeta) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                            contentDescription = if (settings.showMeta) "隐藏张数与大小" else "显示张数与大小",
-                        )
-                    }
+                    // 排序：默认按拍摄时间倒序，菜单里打勾显示当前档
                     Box {
                         IconButton(onClick = { sortMenuOpen = true }) {
                             Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = "排序")
@@ -173,6 +158,44 @@ fun GalleryScreen(
                             }
                         }
                     }
+                    // 只看收藏：点亮时用实心图标 + 主题色，关掉是描边图标（原先是「全部/收藏」两个 chip）
+                    IconButton(onClick = { viewModel.toggleFavoritesFilter() }) {
+                        Icon(
+                            imageVector = if (favoritesOnly) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                            contentDescription = if (favoritesOnly) "只看收藏（已开启）" else "只看收藏（已关闭）",
+                            tint = if (favoritesOnly) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                LocalContentColor.current
+                            },
+                        )
+                    }
+                    // 显示方式：按月 / 按日 / 不分组。改了立即生效并写回设置，下次打开还是这一档。
+                    Box {
+                        IconButton(onClick = { groupMenuOpen = true }) {
+                            Icon(
+                                imageVector = Icons.Filled.CalendarMonth,
+                                contentDescription = "显示方式：" + settings.dateGroupMode.label,
+                            )
+                        }
+                        DropdownMenu(expanded = groupMenuOpen, onDismissRequest = { groupMenuOpen = false }) {
+                            DateGroupMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.label) },
+                                    trailingIcon = {
+                                        if (mode == settings.dateGroupMode) {
+                                            Icon(imageVector = Icons.Filled.Check, contentDescription = null)
+                                        }
+                                    },
+                                    onClick = {
+                                        viewModel.setDateGroupMode(mode)
+                                        groupMenuOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    // 更多二级页面：搜索 / 存储 / 历史 / 文件夹管理 / 清理报告
                     Box {
                         IconButton(onClick = { moreMenuOpen = true }) {
                             Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "更多")
@@ -198,54 +221,6 @@ fun GalleryScreen(
                     }
                 },
             )
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            FilterChip(
-                selected = !favoritesOnly,
-                onClick = { if (favoritesOnly) viewModel.toggleFavoritesFilter() },
-                label = { Text("全部") },
-            )
-            FilterChip(
-                selected = favoritesOnly,
-                onClick = { if (!favoritesOnly) viewModel.toggleFavoritesFilter() },
-                label = { Text("收藏") },
-            )
-            Spacer(Modifier.weight(1f))
-            // "显示方式"：按月 / 按日 / 不分组，立即生效并写回设置（下次打开还是这一档）。
-            Box {
-                AssistChip(
-                    onClick = { groupMenuOpen = true },
-                    label = { Text("显示方式：" + settings.dateGroupMode.label) },
-                    trailingIcon = {
-                        Icon(
-                            imageVector = Icons.Filled.ArrowDropDown,
-                            contentDescription = null,
-                        )
-                    },
-                )
-                DropdownMenu(expanded = groupMenuOpen, onDismissRequest = { groupMenuOpen = false }) {
-                    DateGroupMode.entries.forEach { mode ->
-                        DropdownMenuItem(
-                            text = { Text(mode.label) },
-                            trailingIcon = {
-                                if (mode == settings.dateGroupMode) {
-                                    Icon(imageVector = Icons.Filled.Check, contentDescription = null)
-                                }
-                            },
-                            onClick = {
-                                viewModel.setDateGroupMode(mode)
-                                groupMenuOpen = false
-                            },
-                        )
-                    }
-                }
-            }
         }
 
         if (!access.full) {

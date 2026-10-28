@@ -25,7 +25,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Folder
@@ -33,14 +32,12 @@ import androidx.compose.material.icons.outlined.SearchOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -74,6 +71,7 @@ import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.core.query.MediaFilter
 import io.github.kurumi33.eropic.core.query.SavedFilterCodec
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import kotlinx.coroutines.delay
@@ -102,7 +100,7 @@ private data class SearchStats(val count: Long, val bytes: Long)
  * 点击图片时用 searchIds 取整个结果集的 id 列表再打开查看器，保证查看器里能左右翻完全部搜索结果；
  * 而不是只翻当前已加载的分页。
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SearchScreen(
     viewModel: EropicViewModel,
@@ -179,38 +177,36 @@ fun SearchScreen(
     BackHandler(onBack = onBack)
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+        // 统一顶栏：标题/副标题纯文本，搜索框放在顶栏下方一行，而不是塞进 TopAppBar 的标题里。
+        EropicTopBar(
+            title = "搜索",
+            subtitle = "空格＝同时满足 · | ＝或者 · - 前缀排除",
+            onBack = onBack,
+        )
+        OutlinedTextField(
+            value = input,
+            onValueChange = { input = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+                .focusRequester(focusRequester),
+            placeholder = { Text("搜索文件名或目录：空格＝AND，| ＝OR，- 排除") },
+            singleLine = true,
+            trailingIcon = {
+                if (input.isNotEmpty()) {
+                    IconButton(onClick = { input = "" }) {
+                        Icon(imageVector = Icons.Filled.Close, contentDescription = "清除搜索")
+                    }
                 }
             },
-            title = {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester),
-                    placeholder = { Text("搜索文件名或目录") },
-                    singleLine = true,
-                    trailingIcon = {
-                        if (input.isNotEmpty()) {
-                            IconButton(onClick = { input = "" }) {
-                                Icon(imageVector = Icons.Filled.Close, contentDescription = "清除搜索")
-                            }
-                        }
-                    },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(
-                        onSearch = {
-                            // 点键盘上的搜索直接生效，不必再等 300ms。
-                            focusManager.clearFocus()
-                            query = input.trim()
-                        },
-                    ),
-                )
-            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = {
+                    // 点键盘上的搜索直接生效，不必再等 300ms。
+                    focusManager.clearFocus()
+                    query = input.trim()
+                },
+            ),
         )
 
         if (query.isBlank()) {
@@ -310,7 +306,7 @@ private fun SearchSuggestions(
             Column {
                 Text(text = "搜索图片", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    text = "输入文件名或目录名的一部分即可搜索，结果按当前默认排序展示。",
+                    text = "输入文件名或目录名的一部分即可搜索（空格＝同时满足，| ＝或者，- 前缀排除），结果按当前默认排序展示。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),

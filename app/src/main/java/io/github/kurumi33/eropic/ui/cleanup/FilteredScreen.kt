@@ -3,14 +3,7 @@ package io.github.kurumi33.eropic.ui.cleanup
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,6 +17,7 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.BatchProgressBar
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
 import io.github.kurumi33.eropic.ui.components.MediaGrid
@@ -100,25 +94,10 @@ fun FilteredScreen(
                 onCopy = { copyTargetIds = selectedIds.toList() },
             )
         } else {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("筛选结果")
-                        Text(
-                            text = formatCount(items.itemCount.toLong()) + " 张",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回",
-                        )
-                    }
-                },
+            EropicTopBar(
+                title = "筛选结果",
+                subtitle = formatCount(items.itemCount.toLong()) + " 张",
+                onBack = onBack,
             )
         }
 

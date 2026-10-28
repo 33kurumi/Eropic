@@ -38,6 +38,9 @@ sealed interface AppScreen {
     /** 识图：本地相似图检索 + 联网以图搜图。 */
     data object ImageFind : AppScreen
 
+    /** 更换图集封面：从该文件夹的图片里挑一张。 */
+    data class FolderCover(val relativePath: String) : AppScreen
+
     /** 批量操作结果报告页（C-07）。 */
     data class Report(val report: FileOpReport) : AppScreen
 }

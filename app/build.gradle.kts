@@ -8,7 +8,7 @@ import java.util.Locale
 
 val buildTimeMs = System.currentTimeMillis()
 val buildStamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date(buildTimeMs))
-val appVersionName = "0.4.0"
+val appVersionName = "0.5.0"
 
 plugins {
     alias(libs.plugins.android.application)

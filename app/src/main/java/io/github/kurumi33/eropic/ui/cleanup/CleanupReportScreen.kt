@@ -11,19 +11,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -34,6 +28,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
 import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 
@@ -61,7 +56,6 @@ private data class CleanupReportData(
  * 这里只做"体检汇总"：把各检测器的命中数量与可释放空间集中展示，
  * 不提供一键删除——每一步仍然要用户自己进入分类确认。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CleanupReportScreen(
     viewModel: EropicViewModel,
@@ -148,14 +142,8 @@ fun CleanupReportScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("清理报告") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
+            // v0.5：二级页也用统一顶栏，标题字号、副标题占位与一级页保持一致。
+            EropicTopBar(title = "清理报告", onBack = onBack)
         },
     ) { innerPadding ->
         val current = data

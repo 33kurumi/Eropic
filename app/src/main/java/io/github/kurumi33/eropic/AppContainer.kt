@@ -16,6 +16,7 @@ import io.github.kurumi33.eropic.core.fileops.FolderOps
 import io.github.kurumi33.eropic.core.fileops.MoveRepository
 import io.github.kurumi33.eropic.core.fileops.OperationHistoryRepository
 import io.github.kurumi33.eropic.core.fileops.RenameRepository
+import io.github.kurumi33.eropic.core.folders.FolderRepository
 import io.github.kurumi33.eropic.core.index.IndexCoordinator
 import io.github.kurumi33.eropic.core.index.SignatureGenerator
 import io.github.kurumi33.eropic.core.notify.TrashCleanupScheduler
@@ -72,6 +73,11 @@ class AppContainer(context: Context) {
     val folderOps: FolderOps = FolderOps(appContext, database)
     val operationHistoryRepository: OperationHistoryRepository =
         OperationHistoryRepository(appContext, database, trashRepository)
+
+    // ---- v0.5 文件夹级操作（真实重命名 / 整目录移入回收站 / 置顶 / 封面） ----
+
+    val folderRepository: FolderRepository =
+        FolderRepository(appContext, database, settingsRepository, trashRepository)
 
     /** 立即跑一次回收站过期清理（设置里把保留期调小后调用，让新策略马上生效）。 */
     fun requestTrashCleanup() = TrashCleanupScheduler.requestImmediate(appContext)

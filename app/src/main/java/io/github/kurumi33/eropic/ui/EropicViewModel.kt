@@ -23,6 +23,7 @@ import io.github.kurumi33.eropic.core.fileops.FileOpReport
 import io.github.kurumi33.eropic.core.fileops.MoveResult
 import io.github.kurumi33.eropic.core.fileops.OperationRecord
 import io.github.kurumi33.eropic.core.fileops.RenamePreview
+import io.github.kurumi33.eropic.core.folders.FolderOpResult
 import io.github.kurumi33.eropic.core.index.IndexState
 import io.github.kurumi33.eropic.core.log.CrashLogger
 import io.github.kurumi33.eropic.core.media.MediaUris
@@ -585,7 +586,6 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     private val onlineSearchClient = OnlineImageSearch(
         contentResolver = container.appContext.contentResolver,
         sauceNaoApiKey = { settings.value.sauceNaoApiKey },
-        whosTvAccount = { settings.value.whosTvUsername to settings.value.whosTvPassword },
     )
 
     private val _similarityHits = MutableStateFlow<List<SimilarImageHit>>(emptyList())
@@ -653,27 +653,50 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    /** v0.4：设置里是否已经填了 whos.tv 账号（识图页据此提示"去设置里填"）。 */
-    fun whosTvAccountConfigured(): Boolean =
-        settings.value.whosTvUsername.isNotBlank() && settings.value.whosTvPassword.isNotBlank()
+    // ---- v0.5：文件夹级操作（重命名 / 删除到回收站 / 置顶 / 更换封面） ----
 
-    /** v0.4：保存 whos.tv 账号（密码原样落 DataStore；这是本机本地存储，不经过网络）。 */
-    fun setWhosTvAccount(username: String, password: String) {
+    /** 重命名文件夹（真实改磁盘目录名，并改写该目录下所有图片的索引路径）。 */
+    suspend fun renameFolder(relativePath: String, newName: String): FolderOpResult =
+        container.folderRepository.renameFolder(relativePath, newName)
+
+    /** 删除文件夹：目录下图片全部移入回收站（可恢复），空目录随后删掉。 */
+    suspend fun trashFolder(relativePath: String): FolderOpResult =
+        container.folderRepository.trashFolder(relativePath)
+
+    /** 置顶 / 取消置顶（偏好，不涉及文件系统）。 */
+    fun setFolderPinned(relativePath: String, pinned: Boolean) {
         viewModelScope.launch {
-            container.settingsRepository.setWhosTvAccount(username, password)
-            postMessage(
-                if (username.isBlank() || password.isBlank()) "已清空 whos.tv 账号"
-                else "已保存 whos.tv 账号",
-            )
+            container.folderRepository.setPinned(relativePath, pinned)
+            postMessage(if (pinned) "已置顶该文件夹" else "已取消置顶")
         }
     }
 
-    /** v0.4：清空 whos.tv 账号。 */
-    fun clearWhosTvAccount() {
+    /** 更换图集封面；[mediaId] = null 表示恢复默认（该目录最新一张图）。 */
+    fun setFolderCover(relativePath: String, mediaId: Long?) {
         viewModelScope.launch {
-            container.settingsRepository.clearWhosTvAccount()
-            postMessage("已清空 whos.tv 账号")
+            container.folderRepository.setCover(relativePath, mediaId)
+            postMessage(if (mediaId == null) "已恢复默认封面" else "已更换图集封面")
         }
+    }
+
+    /** 该目录用户自定义的封面 id（没有则 null，界面回落到最新一张）。 */
+    fun folderCoverOverride(relativePath: String): Long? =
+        settings.value.folderCovers[relativePath]
+
+    /** 该目录是否置顶。 */
+    fun isFolderPinned(relativePath: String): Boolean =
+        settings.value.pinnedFolders.contains(relativePath)
+
+    /** 更换封面时的候选图：该目录（含子目录）最近的 [limit] 张。 */
+    suspend fun folderImagesForCover(relativePath: String, limit: Int = 300): List<MediaEntity> {
+        val path = relativePath.trim().trimEnd('/')
+        val ids = repository.ids(
+            SortOrder.DATE_DESC,
+            false,
+            folderPath = path,
+            includeSubfolders = true,
+        ).take(limit)
+        return if (ids.isEmpty()) emptyList() else repository.byIds(ids)
     }
 
     /** 联网识图：成功返回 resultUrl 交给 UI 打开浏览器，失败返回 message。 */

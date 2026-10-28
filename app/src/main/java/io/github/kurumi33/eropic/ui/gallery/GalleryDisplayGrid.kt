@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -165,14 +166,18 @@ private fun GalleryGroupHeaderCell(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // 行高至少 48dp：折叠后整组只剩这一行，太矮既不好点，也和图片行挤在一起
+            .heightIn(min = 48.dp)
             .clickable { onToggleGroup(row.key) }
-            .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 6.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = row.label + " · " + row.count + " 张",
             style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // 占满剩余宽度：把箭头顶到最右侧，折叠/展开的方向一眼可见
+            modifier = Modifier.weight(1f),
         )
         Icon(
             imageVector = if (row.collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,

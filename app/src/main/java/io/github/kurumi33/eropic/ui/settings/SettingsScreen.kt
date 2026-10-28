@@ -34,7 +34,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +59,7 @@ import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 import io.github.kurumi33.eropic.core.settings.ThemeMode
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 
@@ -96,7 +96,8 @@ fun SettingsScreen(viewModel: EropicViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(title = { Text("设置") })
+        // v0.5：统一顶栏；副标题带上版本号，用户反馈问题时能直接说明用的哪一版。
+        EropicTopBar(title = "设置", subtitle = "v0.5")
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -176,7 +177,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
             SettingsSection(
                 title = "联网识图",
-                subtitle = "用浏览器以图搜图；SauceNAO 需要 API Key，whos.tv 需要账号 + 积分；除百度识图外都需要代理。",
+                subtitle = "用浏览器以图搜图；SauceNAO 需要 API Key；除百度识图外都需要代理。识图结果由对应网站返回，图片会上传到该网站。",
             ) {
                 OnlineImageSearchCard(settings = settings, viewModel = viewModel)
             }
@@ -258,7 +259,8 @@ private fun SettingsSection(
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.titleSmall,
+                    // v0.5：分组标题从 titleSmall 提到 titleMedium——之前比组内正文只大一点，扫读时找不到分组。
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
                 if (subtitle != null) {
@@ -276,10 +278,10 @@ private fun SettingsSection(
 }
 
 /**
- * 联网识图：SauceNAO 的 API Key + whos.tv 账号。
+ * 联网识图：只留 SauceNAO 的 API Key。
  *
- * 只有 SauceNAO 需要 key（免费注册后拿到）；Google Lens / Yandex / ascii2d 不填也能用。
- * whos.tv 不是匿名服务：要账号、每次搜图扣积分。两项都只存在本机 DataStore，不经过网络。
+ * v0.5 起界面照 PicImageSearch 的 6 家协议：只有 SauceNAO 强制要 key（免费注册后拿到），
+ * Google Lens / Yandex / 百度识图 / ascii2d / IQDB 都能匿名直接传图。key 只存在本机 DataStore，不经过网络。
  */
 @Composable
 private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewModel) {
@@ -287,15 +289,11 @@ private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewMo
     var showKey by remember { mutableStateOf(false) }
     // 草稿随已保存的 key 同步：保存成功后 settings 变化，输入框会换成新值。
     var keyDraft by remember(settings.sauceNaoApiKey) { mutableStateOf(settings.sauceNaoApiKey) }
-    // v0.4：whos.tv 账号草稿，同样跟着已保存的值走，保存/清除后输入框会换成新值。
-    var whosUserDraft by remember(settings.whosTvUsername) { mutableStateOf(settings.whosTvUsername) }
-    var whosPassDraft by remember(settings.whosTvPassword) { mutableStateOf(settings.whosTvPassword) }
-    var showWhosPassword by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
             text = "SauceNAO 的接口需要免费的 API Key（在 saucenao.com 注册后获取）。" +
-                "不填也能用 Google Lens / Yandex / ascii2d。",
+                "不填也能用 Google Lens / Yandex / 百度识图 / ascii2d / IQDB；除百度识图外都需要代理。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -356,58 +354,6 @@ private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewMo
             )
         }
 
-        HorizontalDivider()
-
-        // v0.4：whos.tv 账号（积分制，站点在 Cloudflare 后面）。
-        Text(text = "whos.tv 账号", style = MaterialTheme.typography.bodyMedium)
-        OutlinedTextField(
-            value = whosUserDraft,
-            onValueChange = { whosUserDraft = it },
-            label = { Text("用户名") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = whosPassDraft,
-            onValueChange = { whosPassDraft = it },
-            label = { Text("密码") },
-            singleLine = true,
-            visualTransformation = if (showWhosPassword) {
-                VisualTransformation.None
-            } else {
-                PasswordVisualTransformation()
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Button(
-                onClick = { viewModel.setWhosTvAccount(whosUserDraft.trim(), whosPassDraft) },
-                enabled = whosUserDraft.isNotBlank() && whosPassDraft.isNotBlank(),
-            ) { Text("保存账号") }
-            TextButton(onClick = { viewModel.clearWhosTvAccount() }) { Text("清除") }
-            TextButton(onClick = { showWhosPassword = !showWhosPassword }) {
-                Text(if (showWhosPassword) "隐藏密码" else "显示密码")
-            }
-        }
-        Text(
-            text = if (settings.whosTvUsername.isNotBlank() && settings.whosTvPassword.isNotBlank()) {
-                "已配置：" + settings.whosTvUsername
-            } else {
-                "未配置，whos.tv 的识图按钮会提示先去填。"
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = "whos.tv 不是匿名服务：需要注册账号，每次搜图扣积分（官网每日签到可加）；" +
-                "站点在 Cloudflare 后面，偶尔会被拦住，可到网页手动上传。账号密码只保存在本机 DataStore，不上传。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

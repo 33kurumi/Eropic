@@ -34,8 +34,8 @@ class SettingsRepository(private val context: Context) {
         val SCAN_INCLUDE_HIDDEN = booleanPreferencesKey("scan_include_hidden")
         val SCAN_EXCLUDED_DIRS = stringPreferencesKey("scan_excluded_dirs")
         val SAUCE_NAO_API_KEY = stringPreferencesKey("sauce_nao_api_key")
-        val WHOS_TV_USERNAME = stringPreferencesKey("whos_tv_username")
-        val WHOS_TV_PASSWORD = stringPreferencesKey("whos_tv_password")
+        val PINNED_FOLDERS = stringPreferencesKey("pinned_folders")
+        val FOLDER_COVERS = stringPreferencesKey("folder_covers")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { prefs ->
@@ -62,8 +62,8 @@ class SettingsRepository(private val context: Context) {
             scanIncludeHidden = prefs[Keys.SCAN_INCLUDE_HIDDEN] ?: defaults.scanIncludeHidden,
             scanExcludedDirs = parseDirs(prefs[Keys.SCAN_EXCLUDED_DIRS]),
             sauceNaoApiKey = prefs[Keys.SAUCE_NAO_API_KEY] ?: defaults.sauceNaoApiKey,
-            whosTvUsername = prefs[Keys.WHOS_TV_USERNAME] ?: defaults.whosTvUsername,
-            whosTvPassword = prefs[Keys.WHOS_TV_PASSWORD] ?: defaults.whosTvPassword,
+            pinnedFolders = parsePinned(prefs[Keys.PINNED_FOLDERS]),
+            folderCovers = parseCovers(prefs[Keys.FOLDER_COVERS]),
         )
     }
 
@@ -124,24 +124,54 @@ class SettingsRepository(private val context: Context) {
     suspend fun setSauceNaoApiKey(raw: String) =
         context.settingsDataStore.edit { it[Keys.SAUCE_NAO_API_KEY] = raw.trim() }
 
-    /**
-     * v0.4：whos.tv 账号。
-     *
-     * 用户名 trim、密码保留原样（密码里的空格可能是有效字符）；
-     * 两者都为空时视为「退出登录」，等价于清空凭据。
-     */
-    suspend fun setWhosTvAccount(username: String, password: String) =
-        context.settingsDataStore.edit {
-            it[Keys.WHOS_TV_USERNAME] = username.trim()
-            it[Keys.WHOS_TV_PASSWORD] = password
+    /** v0.5：置顶 / 取消置顶一个文件夹。路径会在入库前统一去掉首尾斜杠。 */
+    suspend fun setFolderPinned(relativePath: String, pinned: Boolean) {
+        val path = normalizeFolderPath(relativePath)
+        if (path.isEmpty()) return
+        context.settingsDataStore.edit { prefs ->
+            val current = parsePinned(prefs[Keys.PINNED_FOLDERS])
+            val next = if (pinned) {
+                if (current.any { it.equals(path, ignoreCase = true) }) current else current + path
+            } else {
+                current.filterNot { it.equals(path, ignoreCase = true) }
+            }
+            prefs[Keys.PINNED_FOLDERS] = next.joinToString(DIR_SEPARATOR)
         }
+    }
 
-    /** 清空 whos.tv 凭据（登出）。 */
-    suspend fun clearWhosTvAccount() =
-        context.settingsDataStore.edit {
-            it.remove(Keys.WHOS_TV_USERNAME)
-            it.remove(Keys.WHOS_TV_PASSWORD)
+    /** v0.5：设置或清除自定义图集封面（mediaId = null 表示恢复默认）。 */
+    suspend fun setFolderCover(relativePath: String, mediaId: Long?) {
+        val path = normalizeFolderPath(relativePath)
+        if (path.isEmpty()) return
+        context.settingsDataStore.edit { prefs ->
+            val current = parseCovers(prefs[Keys.FOLDER_COVERS]).toMutableMap()
+            current.remove(path)
+            if (mediaId != null && mediaId > 0) current[path] = mediaId
+            prefs[Keys.FOLDER_COVERS] = current.entries.joinToString(DIR_SEPARATOR) { "${it.key}|${it.value}" }
         }
+    }
+
+    /**
+     * v0.5：文件夹被重命名后同步迁移置顶与封面配置。
+     *
+     * 不做迁移的话，重命名会让「置顶」悄悄消失、封面回退成最新图，
+     * 用户会觉得软件把他的设置弄丢了。
+     */
+    suspend fun renameFolderPrefs(oldPath: String, newPath: String) {
+        val from = normalizeFolderPath(oldPath)
+        val to = normalizeFolderPath(newPath)
+        if (from.isEmpty() || to.isEmpty() || from == to) return
+        context.settingsDataStore.edit { prefs ->
+            val pinned = parsePinned(prefs[Keys.PINNED_FOLDERS]).map {
+                if (it == from || it.startsWith("$from/")) to + it.removePrefix(from) else it
+            }
+            prefs[Keys.PINNED_FOLDERS] = pinned.joinToString(DIR_SEPARATOR)
+            val covers = parseCovers(prefs[Keys.FOLDER_COVERS]).entries.associate { (path, id) ->
+                (if (path == from || path.startsWith("$from/")) to + path.removePrefix(from) else path) to id
+            }
+            prefs[Keys.FOLDER_COVERS] = covers.entries.joinToString(DIR_SEPARATOR) { "${it.key}|${it.value}" }
+        }
+    }
 
     suspend fun setScanIncludeHidden(enabled: Boolean) =
         context.settingsDataStore.edit { it[Keys.SCAN_INCLUDE_HIDDEN] = enabled }
@@ -191,5 +221,27 @@ class SettingsRepository(private val context: Context) {
         fun parseDirs(raw: String?): List<String> =
             raw?.split(DIR_SEPARATOR)?.map { it.trim().trim('/') }?.filter { it.isNotEmpty() }?.distinct()
                 ?: emptyList()
+
+        /** 文件夹相对路径规范化：反斜杠转正斜杠、去掉首尾斜杠与多余空白。 */
+        fun normalizeFolderPath(raw: String): String =
+            raw.trim().replace('\\', '/').trim('/').split('/').filter { it.isNotEmpty() }.joinToString("/")
+
+        fun parsePinned(raw: String?): List<String> =
+            raw?.split(DIR_SEPARATOR)?.map { normalizeFolderPath(it) }?.filter { it.isNotEmpty() }?.distinct()
+                ?: emptyList()
+
+        /** 封面配置格式：每行 "相对路径|mediaId"，解析时忽略坏行。 */
+        fun parseCovers(raw: String?): Map<String, Long> {
+            if (raw.isNullOrBlank()) return emptyMap()
+            val result = LinkedHashMap<String, Long>()
+            for (line in raw.split(DIR_SEPARATOR)) {
+                val index = line.lastIndexOf('|')
+                if (index <= 0) continue
+                val path = normalizeFolderPath(line.substring(0, index))
+                val id = line.substring(index + 1).trim().toLongOrNull() ?: continue
+                if (path.isNotEmpty() && id > 0) result[path] = id
+            }
+            return result
+        }
     }
 }

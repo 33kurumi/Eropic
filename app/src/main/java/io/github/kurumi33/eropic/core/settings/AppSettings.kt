@@ -95,14 +95,20 @@ data class AppSettings(
      */
     val sauceNaoApiKey: String = "",
     /**
-     * v0.4：whos.tv 的账号（用户名）。
+     * v0.5：文件夹置顶列表（存相对路径，不带结尾斜杠）。
      *
-     * whos.tv 不是匿名识图：必须先有账号登录（注册需要邀请码），而且每次搜图要扣积分，
-     * 每天签到 +10 积分。所以这两个字段默认空；不填时 whos.tv 按钮会给出「请先填账号」的提示。
+     * 文件夹树里同一层内，置顶的排在最前面；列表与网格两种布局都生效。
+     * 存 DataStore 而不是数据库：这是「用户偏好」而不是「媒体元数据」，
+     * 清空索引重建后不该丢。
      */
-    val whosTvUsername: String = "",
-    /** v0.4：whos.tv 的密码（只存在本机 DataStore，不上传到除 whos.tv 以外的任何地方）。 */
-    val whosTvPassword: String = "",
+    val pinnedFolders: List<String> = emptyList(),
+    /**
+     * v0.5：自定义图集封面（相对路径 → 图片 id）。
+     *
+     * 用户可以在文件夹菜单里「更换图集封面」；没有覆盖时用该目录最新一张图当封面。
+     * 同样属于偏好，不进数据库。
+     */
+    val folderCovers: Map<String, Long> = emptyMap(),
 ) {
     /** 兼容 M4 的布尔语义：是否插入日期分组标题（= 分组粒度不是"不分组"）。 */
     val dateGrouping: Boolean get() = dateGroupMode != DateGroupMode.NONE

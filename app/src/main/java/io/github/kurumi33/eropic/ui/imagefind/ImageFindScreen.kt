@@ -34,7 +34,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
@@ -58,7 +57,6 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -88,6 +86,7 @@ import io.github.kurumi33.eropic.core.search.OnlineSearchResult
 import io.github.kurumi33.eropic.core.search.ReverseImageProvider
 import io.github.kurumi33.eropic.core.search.SimilarImageHit
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -110,8 +109,10 @@ private const val MIN_FIND_COLUMNS = 2
 private const val MAX_FIND_COLUMNS = 8
 
 /**
- * 联网识图固定这 6 家（顺序即按钮顺序）：Google Lens / Yandex / 百度识图 / SauceNAO / ascii2d / whos.tv。
- * 百度识图是国内唯一能直连的一家，放在第三位当兜底；whos.tv 需要账号和积分，放最后。
+ * 联网识图固定这 6 家（顺序即按钮顺序）：Google Lens / Yandex / 百度识图 / SauceNAO / ascii2d / IQDB。
+ *
+ * v0.5 起上传协议照抄 kitUIN/PicImageSearch，六家都满足「匿名 multipart 上传本地图片」；
+ * 百度识图是国内唯一能直连的一家，放在第三位当兜底，IQDB 是二次元图库检索放最后。
  * 这里显式列出来而不是用 ReverseImageProvider.entries，方便以后枚举里再增删而不影响界面顺序。
  */
 private val ONLINE_PROVIDERS: List<ReverseImageProvider> = listOf(
@@ -120,7 +121,7 @@ private val ONLINE_PROVIDERS: List<ReverseImageProvider> = listOf(
     ReverseImageProvider.BAIDU,
     ReverseImageProvider.SAUCENAO,
     ReverseImageProvider.ASCII2D,
-    ReverseImageProvider.WHOSTV,
+    ReverseImageProvider.IQDB,
 )
 
 /**
@@ -278,11 +279,6 @@ fun ImageFindScreen(
             showSauceNaoDialog = true
             return
         }
-        // whos.tv 要登录且每次搜索扣积分：没配账号时不发请求，先引导去设置里填账号。
-        if (provider == ReverseImageProvider.WHOSTV && !viewModel.whosTvAccountConfigured()) {
-            viewModel.postMessage("whos.tv 需要账号：请到 设置 → 联网识图 填用户名与密码（搜图会扣积分）")
-            return
-        }
         onlineLoading = provider
         onlineNotice = null
         scope.launch {
@@ -339,24 +335,10 @@ fun ImageFindScreen(
     BackHandler(enabled = onBack != null) { onBack?.invoke() }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            navigationIcon = {
-                if (onBack != null) {
-                    IconButton(onClick = onBack) {
-                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                }
-            },
-            title = {
-                Column {
-                    Text(text = "识图", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "本地相似图 · 联网以图搜图",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            },
+        EropicTopBar(
+            title = "识图",
+            subtitle = "本地相似图 · 联网以图搜图",
+            onBack = onBack,
             actions = {
                 if (source != null) {
                     IconButton(onClick = { resetSource() }) {
@@ -425,7 +407,6 @@ fun ImageFindScreen(
                         onlineLoading = onlineLoading,
                         notice = onlineNotice,
                         sauceNaoConfigured = viewModel.sauceNaoApiKeyConfigured(),
-                        whosTvConfigured = viewModel.whosTvAccountConfigured(),
                         onSearch = { provider -> launchOnlineSearch(provider) },
                         onOpenHome = { provider -> openProviderHome(provider) },
                     )
@@ -482,10 +463,10 @@ private fun LocalFindTab(
             keyboardActions = KeyboardActions(onSearch = { onKeywordSubmit() }),
         )
 
-        // 与 core/search 里 SimilarityMath.matchesKeyword 的实际行为逐字对应：不区分大小写、
-        // 按子串匹配（所以 cat 会命中 vacation.jpg）、空格不切词、% 与 _ 都不当通配符。
+        // 与 core/search 里 KeywordSyntax 的解析保持一致：空格 = AND、竖线 = OR、前缀 - = 排除，
+        // 不区分大小写按子串匹配，% 与 _ 都是普通字符。
         Text(
-            text = "语法：同时匹配文件名与目录路径 · 不区分大小写 · 按子串匹配（输入 cat 会命中 vacation.jpg）· 空格算关键词的一部分 · % 和 _ 按普通字符处理",
+            text = "语法：空格分隔多个关键词＝同时满足（AND）· 竖线 | 表示或者（例：猫|狗）· 前缀 - 表示排除（例：-截图）· 不区分大小写 · 按子串匹配，输入 cat 会命中 vacation.jpg · % 和 _ 按普通字符处理",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp),
@@ -699,7 +680,6 @@ private fun OnlineFindTab(
     onlineLoading: ReverseImageProvider?,
     notice: OnlineNotice?,
     sauceNaoConfigured: Boolean,
-    whosTvConfigured: Boolean,
     onSearch: (ReverseImageProvider) -> Unit,
     onOpenHome: (ReverseImageProvider) -> Unit,
 ) {
@@ -767,15 +747,15 @@ private fun OnlineFindTab(
                 provider = provider,
                 enabled = onlineLoading == null,
                 loading = onlineLoading == provider,
-                hint = providerHint(provider, sauceNaoConfigured, whosTvConfigured),
-                setupLabel = providerSetupLabel(provider, sauceNaoConfigured, whosTvConfigured),
+                hint = providerHint(provider),
+                setupLabel = providerSetupLabel(provider, sauceNaoConfigured),
                 onSearch = { onSearch(provider) },
                 onOpenHome = { onOpenHome(provider) },
             )
         }
 
         Text(
-            text = "识别不出结果时，可以点「官网」手动上传原图再试。SauceNAO 需要先在「设置 → 联网识图」填 API Key；whos.tv 需要账号 + 积分（每次搜索会扣积分）。",
+            text = "识别不出结果时，可以点「官网」手动上传原图再试。SauceNAO 建议先在「设置 → 联网识图」填 API Key（不填会提示先配置）；除百度识图外，其余服务商通常都需要代理。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 14.dp),
@@ -783,28 +763,25 @@ private fun OnlineFindTab(
     }
 }
 
-/** 每个服务商的状态说明：只描述当前条件，按钮是否可点由 [ProviderRow] 里单独的 loading 决定。 */
-private fun providerHint(
-    provider: ReverseImageProvider,
-    sauceNaoConfigured: Boolean,
-    whosTvConfigured: Boolean,
-): String = when {
-    provider == ReverseImageProvider.SAUCENAO && !sauceNaoConfigured -> "需要 API Key（免费注册）"
-    provider == ReverseImageProvider.WHOSTV && !whosTvConfigured -> "需要 whos.tv 账号（设置 → 联网识图 填）"
-    // 已配好账号时也要提醒：whos.tv 不是免费无限查，每次搜图会扣积分。
-    provider == ReverseImageProvider.WHOSTV -> "whos.tv 每次搜索扣积分（官网签到可加）"
-    provider == ReverseImageProvider.BAIDU -> "国内可直连，不用代理"
-    else -> "上传这张图，在浏览器看结果"
+/**
+ * 每个服务商的一句话说明：v0.5 只讲「要不要代理 / 能不能填 Key」，
+ * 端点与表单字段的实现细节留在 core/search/OnlineImageSearch 里。
+ */
+private fun providerHint(provider: ReverseImageProvider): String = when (provider) {
+    ReverseImageProvider.GOOGLE_LENS -> "海外，需要代理"
+    ReverseImageProvider.YANDEX -> "海外，需要代理"
+    ReverseImageProvider.BAIDU -> "国内可直连"
+    ReverseImageProvider.SAUCENAO -> "海外，需要代理；可填 API Key 提高配额"
+    ReverseImageProvider.ASCII2D -> "海外，需要代理"
+    ReverseImageProvider.IQDB -> "海外，需要代理"
 }
 
 /** 需要先去设置里补配置时，按钮上显示的动作文案；null 表示条件已就绪，可以直接识图。 */
 private fun providerSetupLabel(
     provider: ReverseImageProvider,
     sauceNaoConfigured: Boolean,
-    whosTvConfigured: Boolean,
 ): String? = when {
     provider == ReverseImageProvider.SAUCENAO && !sauceNaoConfigured -> "填 Key"
-    provider == ReverseImageProvider.WHOSTV && !whosTvConfigured -> "填账号"
     else -> null
 }
 

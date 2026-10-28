@@ -1,9 +1,8 @@
 package io.github.kurumi33.eropic.ui.gallery
 
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.gallery.GalleryDates as CoreGalleryDates
 import io.github.kurumi33.eropic.core.settings.DateGroupMode
-import java.time.Instant
-import java.time.ZoneId
 
 /**
  * 图库网格里实际渲染的一行：日期分组标题，或一张照片。
@@ -30,10 +29,14 @@ sealed interface GalleryDisplayRow {
     ) : GalleryDisplayRow
 }
 
-/** 日期分组的键与标题；纯函数，方便单测。 */
+/**
+ * 日期分组的键与标题；纯函数，方便单测。
+ *
+ * v0.5：分组规则统一放到 core/gallery/GalleryDates.kt（那边有独立单测），
+ * 这里只保留网格用得到的入口。两处各写一份很容易漂移——比如"按月"的键
+ * 一边是 "2026-10"、另一边是 "2026 年 10 月"，同一批折叠状态就对不上了。
+ */
 object GalleryGroupDates {
-
-    private val WEEKDAY_LABELS = arrayOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
     /** 折叠/展开用的分组键：不分组返回空串，未知时间返回 "unknown"。 */
     fun key(timestampMs: Long, mode: DateGroupMode): String = when (mode) {
@@ -49,35 +52,13 @@ object GalleryGroupDates {
         DateGroupMode.DAY -> dayLabel(timestampMs)
     }
 
-    fun monthKey(timestampMs: Long): String {
-        if (timestampMs <= 0L) return "unknown"
-        val date = localDate(timestampMs)
-        return date.year.toString() + "-" + date.monthValue.toString().padStart(2, '0')
-    }
+    fun monthKey(timestampMs: Long): String = CoreGalleryDates.groupKeyOf(timestampMs, byDay = false)
 
-    fun monthLabel(timestampMs: Long): String {
-        if (timestampMs <= 0L) return "未知日期"
-        val date = localDate(timestampMs)
-        return date.year.toString() + "年" + date.monthValue + "月"
-    }
+    fun monthLabel(timestampMs: Long): String = CoreGalleryDates.monthLabel(timestampMs)
 
-    fun dayKey(timestampMs: Long): String {
-        if (timestampMs <= 0L) return "unknown"
-        val date = localDate(timestampMs)
-        return date.year.toString() + "-" +
-            date.monthValue.toString().padStart(2, '0') + "-" +
-            date.dayOfMonth.toString().padStart(2, '0')
-    }
+    fun dayKey(timestampMs: Long): String = CoreGalleryDates.groupKeyOf(timestampMs, byDay = true)
 
-    fun dayLabel(timestampMs: Long): String {
-        if (timestampMs <= 0L) return "未知日期"
-        val date = localDate(timestampMs)
-        val weekday = WEEKDAY_LABELS[date.dayOfWeek.value - 1]
-        return date.year.toString() + "年" + date.monthValue + "月" + date.dayOfMonth + "日 " + weekday
-    }
-
-    private fun localDate(timestampMs: Long) =
-        Instant.ofEpochMilli(timestampMs).atZone(ZoneId.systemDefault()).toLocalDate()
+    fun dayLabel(timestampMs: Long): String = CoreGalleryDates.dayLabel(timestampMs)
 }
 
 /**

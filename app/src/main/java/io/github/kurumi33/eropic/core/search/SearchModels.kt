@@ -34,8 +34,7 @@ data class SimilarImageHit(
  */
 data class SimilarityQuery(
     /**
-     * 文件名 / 目录关键词，语义与图库搜索一致：不区分大小写的子串匹配，
-     * `%` 与 `_` 按普通字符处理（用户在搜索框里打 % 是想要 % 这个字符，不是通配符）。
+     * 文件名 / 目录关键词，语义与图库搜索一致，支持多关键词语法，详见 [KeywordSyntax]。
      */
     val keyword: String? = null,
     /** 最多返回多少条，会被夹到 [MIN_LIMIT]..[MAX_LIMIT]。 */
@@ -54,31 +53,34 @@ data class SimilarityQuery(
 /**
  * 联网识图服务。
  *
- * 用 enum 而不是 sealed class：这里的成员只有「服务商」一个维度，每个服务商的展示名与官网是固定数据，
- * UI 用 `entries` 直接铺一排按钮；具体某次搜索成功与否由 [OnlineSearchResult] 表达，不需要为结果再造一层类型。
- * [homeUrl] 是兜底入口：接口失效时 UI 还能让用户去官网手动传图。
+ * v0.5 起改成**照抄 kitUIN/PicImageSearch 的上传协议**（https://github.com/kitUIN/PicImageSearch），
+ * 不再自己逆向：每个引擎的端点、表单字段名、结果页来源都在 [OnlineImageSearch] 对应函数里注明出处。
+ * 采用 PicImageSearch 的理由：它是目前维护最勤的 Python 多引擎实现，字段名改动能第一时间发现，
+ * 出问题时可以逐行对照，而不是靠猜。
  *
- * v0.3 只保留四家：能稳定拿到结果链接的三家 + 二次元专精的 SauceNAO（需要 API Key）。
- * 被删掉的 Bing / TinEye / IQDB / trace.moe 要么接口需要 key、要么没有可复用的结果页，留着只是摆设。
+ * 保留六家（都支持「匿名 multipart 上传本地图片」这一条硬要求）：
+ * - [GOOGLE_LENS]：通用识图覆盖最好；
+ * - [YANDEX]：实拍与二次元都能用，服务端直接 302 到结果页；
+ * - [BAIDU]：百度识图，**国内不需要代理**，是唯一能当兜底用的；
+ * - [SAUCENAO]：二次元索引最全，但官方 API 必须带个人 Key（PicImageSearch 同样要 api_key）；
+ * - [ASCII2D]：二次元以图搜图，匿名可用；
+ * - [IQDB]：老牌二次元图库检索，匿名可用（国内通常要代理）。
+ *
+ * 被排除的：Bing（需要解密 imageSignature 的 XOR 两步流程，维护成本高）、TinEye（要先拿 query_hash
+ * 再走会话接口）、trace.moe / AnimeTrace（返回 JSON 而不是结果页，属于「识别 API」而非「以图搜图」）、
+ * whos.tv（非匿名：账号 + 积分 + Cloudflare，v0.4 已下线）。
+ *
  * 枚举顺序即 UI 上按钮顺序。
- *
- * v0.4 增加两家（2026-10-28 读完 ccloli/Search-By-Image、koishijs/plugin-image-search、
- * 4evergr8/FlutterPicOrigin、lolishinshi/imsearch、FlanChanXwO/whostv-toolkit-manager 后的结论）：
- * - [BAIDU]：百度识图，匿名 multipart 上传即可，且**国内不用代理**，是这几家里唯一能当「兜底」用的；
- * - [WHOSTV]：whos.tv，截图搜番号（成人内容识别）。它**不是匿名服务**：要账号登录、每次搜图扣积分、
- *   站点还在 Cloudflare 后面，所以实现上按「账号 + 失败提示」处理，不保证一次成功。
- *
- * 另外四家的对照结论：koishi 插件与 FlutterPicOrigin 走的是「先把图传到公共图床，再用各站
- * search-by-url 链接」的路子（FlutterPicOrigin 甚至让用户自己填一个 Cloudflare Worker 地址），
- * 因此它们能覆盖 TinEye/IQDB/trace.moe；我们不托管图片，只能走各站的匿名上传接口，
- * 覆盖范围自然窄一些 —— 这是设计取舍，不是实现缺陷。
  */
 enum class ReverseImageProvider(val label: String, val homeUrl: String) {
     /** Google Lens：匿名上传最稳的一家，通用图片覆盖最好。 */
     GOOGLE_LENS("Google Lens", "https://lens.google.com/"),
 
-    /** Yandex 识图：实拍与二次元都能用，匿名上传后可拿到结果页链接。 */
+    /** Yandex 识图：实拍与二次元都能用，匿名上传后 302 到结果页。 */
     YANDEX("Yandex", "https://yandex.com/images/"),
+
+    /** 百度识图：匿名上传，国内直连不需要代理；实拍/中文场景覆盖好，二次元一般。 */
+    BAIDU("百度识图", "https://graph.baidu.com/"),
 
     /** SauceNAO：pixiv / twitter / danbooru 等索引，二次元识图最准；必须先在设置里填 API Key。 */
     SAUCENAO("SauceNAO", "https://saucenao.com/"),
@@ -86,11 +88,8 @@ enum class ReverseImageProvider(val label: String, val homeUrl: String) {
     /** ascii2d：二次元以图搜图，匿名可用。 */
     ASCII2D("ascii2d", "https://ascii2d.net/"),
 
-    /** 百度识图：匿名上传，国内直连不需要代理；实拍/中文场景覆盖好，二次元一般。 */
-    BAIDU("百度识图", "https://graph.baidu.com/"),
-
-    /** whos.tv：截图搜番号。需要账号 + 积分，站点在 Cloudflare 后面，见 [OnlineImageSearch]。 */
-    WHOSTV("whos.tv", "https://whos.tv/"),
+    /** IQDB：二次元图库检索（2D 图），匿名可用；国内通常需要代理。 */
+    IQDB("IQDB", "https://iqdb.org/"),
 }
 
 /**
@@ -112,6 +111,67 @@ data class OnlineSearchResult(
     /** 失败原因（中文）；成功时为 null。 */
     val message: String? = null,
 )
+
+/**
+ * 关键词查询（文件名 + 目录路径）的语法解析。
+ *
+ * 语法（v0.5 起）：
+ * - 空格分隔多个条件 = **全部满足**（AND）：`cat 2024` 要求文件名或目录同时含 cat 与 2024；
+ * - `|` 表示**或**（OR）：`cat|kitten` 命中任意一个即可，可与空格组合：`cat|kitten 2024`；
+ * - `-前缀` 表示**排除**：`cat -screenshot` 命中 cat 但不含 screenshot；
+ * - 不区分大小写、按子串匹配（`cat` 会命中 `vacation.jpg`）；`%` 与 `_` 按普通字符处理；
+ * - 引号不做特殊处理（不需要精确短语，空格本身就是 AND）。
+ *
+ * 抽成纯函数是为了能在 JVM 单测里直接断言，也避免 UI 与仓库层各写一套。
+ */
+internal object KeywordSyntax {
+
+    /** 解析结果：每组 includes 之间是 AND，组内多个词是 OR；excludes 命中任意一个即排除。 */
+    data class Query(
+        val includes: List<List<String>>,
+        val excludes: List<String>,
+    ) {
+        val isEmpty: Boolean get() = includes.isEmpty() && excludes.isEmpty()
+    }
+
+    fun parse(raw: String?): Query {
+        val text = raw?.trim().orEmpty()
+        if (text.isEmpty()) return Query(emptyList(), emptyList())
+        val includes = ArrayList<List<String>>()
+        val excludes = ArrayList<String>()
+        // 用正则切空白（含全角空格），避免用户从别处粘贴来的不间断空格把词粘在一起
+        for (token in text.split(WHITESPACE)) {
+            if (token.isEmpty()) continue
+            if (token.length > 1 && token.startsWith("-")) {
+                excludes += token.substring(1).lowercase()
+                continue
+            }
+            val alternatives = token.split('|')
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() }
+            if (alternatives.isNotEmpty()) includes += alternatives
+        }
+        return Query(includes, excludes)
+    }
+
+    /** 是否命中：任一 include 组整体不满足就失败；excludes 命中任意一个就失败。 */
+    fun matches(displayName: String, relativePath: String, query: Query): Boolean {
+        if (query.isEmpty) return true
+        val haystack = (displayName + "\n" + relativePath).lowercase()
+        for (group in query.includes) {
+            if (group.none { haystack.contains(it) }) return false
+        }
+        for (excluded in query.excludes) {
+            if (haystack.contains(excluded)) return false
+        }
+        return true
+    }
+
+    fun matches(displayName: String, relativePath: String, raw: String?): Boolean =
+        matches(displayName, relativePath, parse(raw))
+
+    private val WHITESPACE = Regex("[\\s\\u3000]+")
+}
 
 /**
  * 相似度计算的纯函数集合。
@@ -148,13 +208,10 @@ internal object SimilarityMath {
     fun clampDistance(distance: Int): Int = distance.coerceIn(0, MAX_HAMMING_DISTANCE)
 
     /**
-     * 关键词是否命中：文件名或目录任一包含即算命中，忽略大小写。
+     * 关键词是否命中：文件名或目录满足全部条件即算命中，语法见 [KeywordSyntax]。
      *
      * 空关键词一律视为「不筛选」；`%` 与 `_` 按字面比较（与 [SimilarityQuery.keyword] 的文档一致）。
      */
-    fun matchesKeyword(displayName: String, relativePath: String, keyword: String?): Boolean {
-        val needle = keyword?.trim()?.takeIf { it.isNotEmpty() } ?: return true
-        return displayName.contains(needle, ignoreCase = true) ||
-            relativePath.contains(needle, ignoreCase = true)
-    }
+    fun matchesKeyword(displayName: String, relativePath: String, keyword: String?): Boolean =
+        KeywordSyntax.matches(displayName, relativePath, keyword)
 }

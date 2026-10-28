@@ -61,6 +61,7 @@ import io.github.kurumi33.eropic.ui.folders.FolderManagerScreen
 import io.github.kurumi33.eropic.ui.folders.FoldersSection
 import io.github.kurumi33.eropic.ui.gallery.GalleryScreen
 import io.github.kurumi33.eropic.ui.history.OperationHistoryScreen
+import io.github.kurumi33.eropic.ui.folders.FolderCoverScreen
 import io.github.kurumi33.eropic.ui.imagefind.ImageFindScreen
 import io.github.kurumi33.eropic.ui.permission.MediaPermissions
 import io.github.kurumi33.eropic.ui.permission.PermissionScreen
@@ -285,6 +286,14 @@ fun EropicRoot(viewModel: EropicViewModel) {
                             viewModel = viewModel,
                             onBack = closeScreen,
                             onOpenViewer = viewModel::openViewer,
+                        )
+                        is AppScreen.FolderCover -> FolderCoverScreen(
+                            viewModel = viewModel,
+                            relativePath = current.relativePath,
+                            folderName = current.relativePath.trimEnd('/').substringAfterLast('/'),
+                            onBack = closeScreen,
+                            // 成功提示由 ViewModel.setFolderCover 统一 post，这里传空避免弹两次
+                            onMessage = {},
                         )
                         is AppScreen.Report -> ReportScreen(
                             report = current.report,

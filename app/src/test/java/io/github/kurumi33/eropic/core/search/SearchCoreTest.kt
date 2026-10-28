@@ -114,10 +114,10 @@ class SearchCoreTest {
     fun reverseImageProvider_keepsSixDistinctHttpsHomes() {
         val providers = ReverseImageProvider.entries
         assertEquals(6, providers.size)
-        // 枚举顺序是"实现顺序"；UI 上的按钮顺序由 ImageFindScreen.ONLINE_PROVIDERS 单独固定，
-        // 那里把百度识图插在 Yandex 之后、whos.tv 放最后，所以这里只校验集合内容。
+        // v0.5 起对齐 kitUIN/PicImageSearch：whos.tv 下线（需要账号+积分且被 Cloudflare 拦），
+        // 补上实现简单的 IQDB。枚举顺序即 UI 上的按钮顺序。
         assertEquals(
-            listOf("GOOGLE_LENS", "YANDEX", "SAUCENAO", "ASCII2D", "BAIDU", "WHOSTV"),
+            listOf("GOOGLE_LENS", "YANDEX", "BAIDU", "SAUCENAO", "ASCII2D", "IQDB"),
             providers.map { it.name },
         )
         assertEquals(6, providers.map { it.label }.distinct().size)
@@ -178,20 +178,29 @@ class SearchCoreTest {
         )
     }
 
-    // ---------- Google 响应解析 ----------
+    // ---------- Google Lens 响应解析（v0.5 起按 PicImageSearch 的 udm 分类链接） ----------
 
     @Test
-    fun googleResultUrl_decodesAmpAndStopsAtQuote() {
-        val html = "<a href=\"https://lens.google.com/search?ep=abc&amp;re=df\">结果</a>"
+    fun googleLensResultUrl_picksVisualMatchesLink() {
+        val html = "<a href=\"/search?ep=abc&amp;udm=44&amp;q=cat\">结果</a>"
         assertEquals(
-            "https://lens.google.com/search?ep=abc&re=df",
-            ReverseSearchParsers.googleResultUrl(html),
+            "https://www.google.com/search?ep=abc&udm=44&q=cat",
+            ReverseSearchParsers.googleLensResultUrl(html),
         )
     }
 
     @Test
-    fun googleResultUrl_returnsNullWhenAbsent() {
-        assertNull(ReverseSearchParsers.googleResultUrl("<html>no result</html>"))
+    fun googleLensResultUrl_fallsBackToLensSearchLink() {
+        val html = "<a href=\"https://lens.google.com/search?ep=xyz\">结果</a>"
+        assertEquals(
+            "https://lens.google.com/search?ep=xyz",
+            ReverseSearchParsers.googleLensResultUrl(html),
+        )
+    }
+
+    @Test
+    fun googleLensResultUrl_returnsNullWhenAbsent() {
+        assertNull(ReverseSearchParsers.googleLensResultUrl("<html>no result</html>"))
     }
 
     // ---------- SauceNAO 响应解析 ----------

@@ -23,7 +23,6 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,7 +31,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -64,10 +62,13 @@ import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.common.formatMediaSubtitle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /** 清理页的八个入口。前两个来自查重分组，其余来自检测器。 */
@@ -89,7 +90,6 @@ private sealed interface CleanupContent {
     data class Detected(val items: List<MediaEntity>, val summary: String) : CleanupContent
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CleanupScreen(
     viewModel: EropicViewModel,
@@ -267,9 +267,24 @@ fun CleanupScreen(
         }
     }
 
+    // 顶栏副标题：整页「几类问题 / 一共能释放多少」的概览。
+    // 统计口径与「清理报告」一致（同一批检测器），但这里只要类别数与总字节；
+    // 索引还没跑完或某一类读取失败时留空，副标题空着也不影响页面使用。
+    val overview by produceState<CleanupOverview?>(
+        initialValue = null,
+        indexState.phase,
+        groups.size,
+        refreshToken,
+    ) {
+        value = runCatching { loadCleanupOverview(viewModel, groups) }.getOrNull()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("清理") },
+        EropicTopBar(
+            title = "清理",
+            subtitle = overview?.let {
+                "${it.categoryCount} 类问题 · 可释放 ${formatBytes(it.bytes)}"
+            },
             actions = {
                 IconButton(onClick = { viewModel.openScreen(AppScreen.Trash) }) {
                     Icon(imageVector = Icons.Filled.Delete, contentDescription = "回收站")
@@ -608,4 +623,73 @@ private fun MediaListRow(
             Box(modifier = Modifier.width(4.dp))
         }
     }
+}
+
+/** 顶栏副标题用的概览：有问题的类别数、这些类别估算能释放多少字节。 */
+private data class CleanupOverview(val categoryCount: Int, val bytes: Long)
+
+/**
+ * 统计顶栏副标题。
+ *
+ * 和「清理报告」用的是同一批检测器，但这里不展示明细，只数「有命中的类别」和它们的
+ * 可释放字节。旧图/截图/模糊三类没有现成的汇总查询，只能取回候选列表再累加，所以要
+ * 放到 IO 线程上跑：页面上副标题先空着，加载完再出现，不阻塞首屏。
+ *
+ * 任何一类读取失败都按「没有命中」处理——副标题不该影响页面本身能不能用。
+ */
+private suspend fun loadCleanupOverview(
+    viewModel: EropicViewModel,
+    groups: List<DuplicateGroupEntity>,
+): CleanupOverview = withContext(Dispatchers.IO) {
+    var categoryCount = 0
+    var bytes = 0L
+
+    // 重复 / 相似：分组表里已经算好了每组可释放字节。
+    for (kind in listOf(DuplicateScanner.KIND_EXACT, DuplicateScanner.KIND_NEAR)) {
+        val matched = groups.filter { it.kind == kind }
+        if (matched.isNotEmpty()) {
+            categoryCount++
+            bytes += matched.sumOf { it.reclaimableBytes }
+        }
+    }
+
+    // 大文件：检测器直接给命中数（不受 Top N 截断影响）。
+    runCatching { viewModel.largeFiles() }.getOrNull()?.let { result ->
+        if (result.hitCount > 0L) {
+            categoryCount++
+            bytes += result.reclaimableBytes
+        }
+    }
+
+    // 旧图 / 截图 / 模糊：没有汇总接口，取回候选列表自己算。
+    val listQueries = listOf<suspend () -> List<MediaEntity>>(
+        { viewModel.oldPhotos() },
+        { viewModel.screenshots() },
+        { viewModel.blurred() },
+    )
+    for (query in listQueries) {
+        val items = runCatching { query() }.getOrNull()
+        if (!items.isNullOrEmpty()) {
+            categoryCount++
+            bytes += items.sumOf { it.sizeBytes }
+        }
+    }
+
+    // 连拍：命中数是 Int，可释放字节按「每组留一张」估算。
+    runCatching { viewModel.bursts() }.getOrNull()?.let { result ->
+        if (result.hitCount > 0) {
+            categoryCount++
+            bytes += result.reclaimableBytes
+        }
+    }
+
+    // 大图按像素统计，命中数与字节由 summary 提供（不截断）。
+    runCatching { viewModel.largeImageSummary() }.getOrNull()?.let { row ->
+        if (row.hits > 0L) {
+            categoryCount++
+            bytes += row.bytes
+        }
+    }
+
+    CleanupOverview(categoryCount = categoryCount, bytes = bytes)
 }

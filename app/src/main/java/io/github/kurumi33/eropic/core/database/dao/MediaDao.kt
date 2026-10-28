@@ -201,4 +201,17 @@ interface MediaDao {
             "ORDER BY dateTakenMs DESC, id DESC LIMIT 1"
     )
     suspend fun folderCover(pattern: String): MediaEntity?
+
+    // ---- v0.5 文件夹级操作（重命名 / 整目录移入回收站 / 封面） ----
+
+    /** 目录（含子目录）里所有在场图片的 id；[pattern] = 转义后的 "相对目录/%"。 */
+    @Query("SELECT id FROM media_item WHERE isPresent = 1 AND relativePath LIKE :pattern ESCAPE '\\'")
+    suspend fun idsUnderFolder(pattern: String): List<Long>
+
+    /** 目录（含子目录）里所有在场图片的轻量路径行，用于批量改写路径。 */
+    @Query(
+        "SELECT id, path, relativePath, displayName FROM media_item " +
+            "WHERE isPresent = 1 AND relativePath LIKE :pattern ESCAPE '\\'"
+    )
+    suspend fun pathRowsUnderFolder(pattern: String): List<io.github.kurumi33.eropic.core.model.MediaPathRow>
 }
