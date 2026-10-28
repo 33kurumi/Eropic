@@ -10,6 +10,7 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -18,11 +19,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CleaningServices
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -59,17 +60,25 @@ import io.github.kurumi33.eropic.ui.folders.FolderManagerScreen
 import io.github.kurumi33.eropic.ui.folders.FoldersSection
 import io.github.kurumi33.eropic.ui.gallery.GalleryScreen
 import io.github.kurumi33.eropic.ui.history.OperationHistoryScreen
+import io.github.kurumi33.eropic.ui.imagefind.ImageFindScreen
 import io.github.kurumi33.eropic.ui.permission.MediaPermissions
 import io.github.kurumi33.eropic.ui.permission.PermissionScreen
+import io.github.kurumi33.eropic.ui.permission.StorageAccessScreen
 import io.github.kurumi33.eropic.ui.report.ReportScreen
 import io.github.kurumi33.eropic.ui.search.SearchScreen
 import io.github.kurumi33.eropic.ui.settings.SettingsScreen
 import io.github.kurumi33.eropic.ui.storage.StorageDashboardScreen
-import io.github.kurumi33.eropic.ui.trash.TrashSection
+import io.github.kurumi33.eropic.ui.trash.TrashScreen
 import io.github.kurumi33.eropic.ui.viewer.ImageViewerScreen
 
 private data class Tab(val label: String, val icon: ImageVector)
 
+/**
+ * 应用根：底部 4 个 Tab（图库 / 文件夹 / 清理 / 设置）+ 叠加式的二级页面。
+ *
+ * v0.2 起「回收站」不再是底栏 Tab（底部还要继续加功能，避免拥挤），改由「清理」页进入；
+ * 因此这里多了一个 [AppScreen.Trash] 路由，其余二级页路由保持不变。
+ */
 @Composable
 fun EropicRoot(viewModel: EropicViewModel) {
     val context = LocalContext.current
@@ -112,12 +121,18 @@ fun EropicRoot(viewModel: EropicViewModel) {
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // 通知权限：回收站"即将到期"提醒需要它。只在用户第一次进回收站时问，不在启动时打扰。
+    val viewerTarget by viewModel.viewerTarget.collectAsStateWithLifecycle()
+    val screen by viewModel.screen.collectAsStateWithLifecycle()
+    val report by viewModel.lastReport.collectAsStateWithLifecycle()
+    val batchState by viewModel.batchState.collectAsStateWithLifecycle()
+    val closeScreen = viewModel::closeScreen
+
+    // 通知权限：回收站"即将到期"提醒需要它。只在用户第一次打开回收站时问，不在启动时打扰。
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { /* 拒绝也不影响功能，只是收不到到期提醒 */ }
-    LaunchedEffect(tabIndex) {
-        if (tabIndex == 3 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    LaunchedEffect(screen) {
+        if (screen is AppScreen.Trash && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS,
@@ -126,12 +141,12 @@ fun EropicRoot(viewModel: EropicViewModel) {
         }
     }
 
-    // 回收站到期提醒点进来时直接落到回收站 tab（extra 用完即清，避免旋转/重建反复触发）。
+    // 回收站到期提醒点进来时直接打开回收站页（extra 用完即清，避免旋转/重建反复触发）。
     LaunchedEffect(Unit) {
         val activity = context as? Activity ?: return@LaunchedEffect
         val intent = activity.intent ?: return@LaunchedEffect
         if (intent.getBooleanExtra(TrashNotifications.EXTRA_OPEN_TRASH, false)) {
-            tabIndex = 3
+            viewModel.openScreen(AppScreen.Trash)
             intent.removeExtra(TrashNotifications.EXTRA_OPEN_TRASH)
         }
     }
@@ -151,20 +166,17 @@ fun EropicRoot(viewModel: EropicViewModel) {
         }
     }
 
-    val viewerTarget by viewModel.viewerTarget.collectAsStateWithLifecycle()
-    val screen by viewModel.screen.collectAsStateWithLifecycle()
-    val report by viewModel.lastReport.collectAsStateWithLifecycle()
-    val batchState by viewModel.batchState.collectAsStateWithLifecycle()
-    val closeScreen = viewModel::closeScreen
     val tabs = remember {
         listOf(
             Tab("图库", Icons.Filled.PhotoLibrary),
             Tab("文件夹", Icons.Filled.Folder),
             Tab("清理", Icons.Filled.CleaningServices),
-            Tab("回收站", Icons.Filled.Delete),
             Tab("设置", Icons.Filled.Settings),
         )
     }
+
+    // 有全屏叠加层时连底部导航一起藏起来：用户反馈过"进二级页还能看到下面的设置内容"。
+    val overlayVisible = viewerTarget == null && (screen != null || report != null)
 
     // 关键结构：主页 Scaffold 始终在底部存活，查看器/二级页/结果页只是"盖"在上面的叠加层。
     // 早返回（把整棵树换成查看器）会销毁图库的 LazyGrid，关闭查看器后滚动位置和捏合列数全会丢。
@@ -172,14 +184,16 @@ fun EropicRoot(viewModel: EropicViewModel) {
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             bottomBar = {
-                NavigationBar {
-                    tabs.forEachIndexed { index, tab ->
-                        NavigationBarItem(
-                            selected = tabIndex == index,
-                            onClick = { tabIndex = index },
-                            icon = { Icon(tab.icon, contentDescription = tab.label) },
-                            label = { Text(tab.label) },
-                        )
+                if (!overlayVisible) {
+                    NavigationBar {
+                        tabs.forEachIndexed { index, tab ->
+                            NavigationBarItem(
+                                selected = tabIndex == index,
+                                onClick = { tabIndex = index },
+                                icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                label = { Text(tab.label) },
+                            )
+                        }
                     }
                 }
             },
@@ -209,11 +223,6 @@ fun EropicRoot(viewModel: EropicViewModel) {
                         viewModel = viewModel,
                         onOpenViewer = viewModel::openViewer,
                         hasWriteAccess = hasWriteAccess,
-                    )
-                    3 -> TrashSection(
-                        viewModel = viewModel,
-                        hasWriteAccess = hasWriteAccess,
-                        onMessage = { text -> viewModel.postMessage(text) },
                     )
                     else -> SettingsScreen(viewModel)
                 }
@@ -252,6 +261,21 @@ fun EropicRoot(viewModel: EropicViewModel) {
                             onBack = closeScreen,
                         )
                         AppScreen.About -> AboutScreen(viewModel = viewModel, onBack = closeScreen)
+                        AppScreen.Trash -> TrashScreen(
+                            viewModel = viewModel,
+                            hasWriteAccess = hasWriteAccess,
+                            onMessage = { text -> viewModel.postMessage(text) },
+                            onBack = closeScreen,
+                        )
+                        AppScreen.Permission -> StorageAccessScreen(
+                            viewModel = viewModel,
+                            onBack = closeScreen,
+                        )
+                        AppScreen.ImageFind -> ImageFindScreen(
+                            viewModel = viewModel,
+                            onBack = closeScreen,
+                            onOpenViewer = viewModel::openViewer,
+                        )
                         is AppScreen.Report -> ReportScreen(
                             report = current.report,
                             // 先清掉结果、再关页面：否则关掉后 lastReport 又把结果页顶回来，形成导航环。
@@ -305,7 +329,10 @@ fun EropicRoot(viewModel: EropicViewModel) {
 }
 
 /**
- * 叠加页外壳：铺满并吃掉落在空白处的点击，避免点击"穿透"到下面的图库网格。
+ * 叠加页外壳：不透明背景 + 铺满，吃掉落在空白处的点击。
+ *
+ * 不透明背景是必须的：之前只铺了透明 Box，二级页自己的 Scaffold 背景有空隙时
+ * 能看到下面主页的卡片（用户反馈"设置上面盖一层，还能看到底部设置内容"）。
  */
 @Composable
 private fun BlockingOverlay(content: @Composable () -> Unit) {
@@ -313,6 +340,7 @@ private fun BlockingOverlay(content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .clickable(
                 interactionSource = interaction,
                 indication = null,

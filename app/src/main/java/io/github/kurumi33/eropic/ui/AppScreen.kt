@@ -29,6 +29,15 @@ sealed interface AppScreen {
     /** 关于：版本、开源许可、崩溃日志。 */
     data object About : AppScreen
 
+    /** 回收站（v0.2 起从底栏移出，改由「清理」页进入）。 */
+    data object Trash : AppScreen
+
+    /** 「所有文件访问」权限说明与跳转。 */
+    data object Permission : AppScreen
+
+    /** 识图：本地相似图检索 + 联网以图搜图。 */
+    data object ImageFind : AppScreen
+
     /** 批量操作结果报告页（C-07）。 */
     data class Report(val report: FileOpReport) : AppScreen
 }

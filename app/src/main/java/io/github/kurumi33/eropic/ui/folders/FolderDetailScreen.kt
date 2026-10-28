@@ -50,14 +50,19 @@ fun FolderDetailScreen(
     onBack: () -> Unit,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
     hasWriteAccess: Boolean = false,
+    /** 初始是否聚合子文件夹：网格页点「查看本层全部图片」时把网格页的开关状态带进来。 */
+    initialIncludeSubfolders: Boolean = false,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
-    // 根目录 = 全部照片（MediaQuery 对空 path 不加目录条件）。
-    var includeSubfolders by rememberSaveable(folderPath) { mutableStateOf(false) }
-    val effectiveIncludeSubfolders = includeSubfolders
+    // 根目录 = 全部照片（MediaQuery 对空 path 不加目录条件），所以根目录下聚合开关没有意义。
+    var includeSubfolders by rememberSaveable(folderPath, initialIncludeSubfolders) {
+        mutableStateOf(initialIncludeSubfolders)
+    }
+    // 只有非根目录的开关才生效；根目录下两种取值查到的都是全部照片，统一按"不聚合"展示。
+    val effectiveIncludeSubfolders = includeSubfolders && folderPath.isNotEmpty()
 
     val items = remember(folderPath, effectiveIncludeSubfolders) {
         viewModel.folderMedia(folderPath, effectiveIncludeSubfolders)
@@ -114,7 +119,13 @@ fun FolderDetailScreen(
                         Text(text = folderName, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
                             text = buildString {
-                                append(if (effectiveIncludeSubfolders) "含子文件夹" else "仅当前文件夹")
+                                append(
+                                    when {
+                                        folderPath.isEmpty() -> "全部照片"
+                                        effectiveIncludeSubfolders -> "含子文件夹"
+                                        else -> "仅当前文件夹"
+                                    },
+                                )
                                 append(" · ")
                                 append(formatCount(items.itemCount.toLong()))
                                 append(" 张")
@@ -128,8 +139,8 @@ fun FolderDetailScreen(
         }
 
         SubfolderModeBar(
-            includeSubfolders = includeSubfolders,
-            enabled = true,
+            includeSubfolders = effectiveIncludeSubfolders,
+            enabled = folderPath.isNotEmpty(),
             onToggle = { checked ->
                 includeSubfolders = checked
                 // 切换范围后屏幕上的照片集合会变，之前的选中项可能已经不可见，
@@ -220,7 +231,7 @@ fun FolderDetailScreen(
 }
 
 @Composable
-private fun SubfolderModeBar(
+internal fun SubfolderModeBar(
     includeSubfolders: Boolean,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,

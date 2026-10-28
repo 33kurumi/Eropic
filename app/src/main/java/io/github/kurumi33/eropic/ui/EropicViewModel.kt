@@ -1,5 +1,6 @@
 package io.github.kurumi33.eropic.ui
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -24,12 +25,20 @@ import io.github.kurumi33.eropic.core.fileops.OperationRecord
 import io.github.kurumi33.eropic.core.fileops.RenamePreview
 import io.github.kurumi33.eropic.core.index.IndexState
 import io.github.kurumi33.eropic.core.log.CrashLogger
+import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.model.FolderRow
 import io.github.kurumi33.eropic.core.model.StatRow
 import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.core.query.MediaFilter
+import io.github.kurumi33.eropic.core.search.ImageSearchRepository
+import io.github.kurumi33.eropic.core.search.OnlineImageSearch
+import io.github.kurumi33.eropic.core.search.OnlineSearchResult
+import io.github.kurumi33.eropic.core.search.ReverseImageProvider
+import io.github.kurumi33.eropic.core.search.SimilarImageHit
+import io.github.kurumi33.eropic.core.search.SimilarityQuery
 import io.github.kurumi33.eropic.core.settings.AppSettings
+import io.github.kurumi33.eropic.core.settings.DateGroupMode
 import io.github.kurumi33.eropic.core.settings.RetentionOption
 import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 import io.github.kurumi33.eropic.core.settings.ThemeMode
@@ -524,6 +533,95 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     fun latestCrashLog(): String? = CrashLogger.latest(container.appContext)
 
     fun clearCrashLogs() = CrashLogger.clear(container.appContext)
+
+    // ---- v0.2：图库时间分组粒度（不分组 / 按月 / 按日） ----
+
+    fun setDateGroupMode(mode: DateGroupMode) {
+        viewModelScope.launch { settingsRepository.setDateGroupMode(mode) }
+    }
+
+    // ---- v0.2：回收站位置可见、可改 ----
+
+    /** 当前设置对应的回收站绝对路径。 */
+    suspend fun configuredTrashDir(): String = trashRepository.configuredTrashDir()
+
+    /** 当前设置目录 + 已有条目所在的旧目录（改过位置后老条目仍留在原处）。 */
+    suspend fun trashLocations(): List<String> = trashRepository.trashLocations()
+
+    /** 改回收站位置；空串 = 默认 <卷根>/.EropicTrash。 */
+    fun setTrashRelativeDir(relativeDir: String) {
+        viewModelScope.launch {
+            settingsRepository.setTrashRelativeDir(relativeDir)
+            postMessage("回收站新位置：" + trashRepository.configuredTrashDir())
+        }
+    }
+
+    // ---- v0.2：识图（本地相似图检索 + 联网以图搜图） ----
+
+    private val imageSearch = ImageSearchRepository(container.appContext, container.database)
+    private val onlineSearchClient = OnlineImageSearch(container.appContext.contentResolver)
+
+    private val _similarityHits = MutableStateFlow<List<SimilarImageHit>>(emptyList())
+
+    /** 识图结果，按相似度从高到低。 */
+    val similarityHits: StateFlow<List<SimilarImageHit>> = _similarityHits
+
+    private val _similaritySearching = MutableStateFlow(false)
+    val similaritySearching: StateFlow<Boolean> = _similaritySearching
+
+    private var similaritySourceId: Long? = null
+    private var similaritySourceUri: Uri? = null
+    private var similarityKeyword: String? = null
+
+    /** 以图库里的某张图作为源图检索相似图。 */
+    fun findSimilarByMediaId(mediaId: Long) {
+        similaritySourceId = mediaId
+        similaritySourceUri = null
+        runSimilaritySearch()
+    }
+
+    /** 以系统相册选出的 Uri 作为源图检索。 */
+    fun findSimilarByUri(uri: Uri) {
+        similaritySourceUri = uri
+        similaritySourceId = null
+        runSimilaritySearch()
+    }
+
+    /** 关键词辅助（文件名/目录），空串表示不过滤；有源图时立刻重跑。 */
+    fun setSimilarityKeyword(text: String) {
+        similarityKeyword = text.trim().ifEmpty { null }
+        if (similaritySourceId != null || similaritySourceUri != null) runSimilaritySearch()
+    }
+
+    private fun runSimilaritySearch() {
+        viewModelScope.launch {
+            _similaritySearching.value = true
+            val query = SimilarityQuery(keyword = similarityKeyword)
+            val hits = runCatching {
+                val id = similaritySourceId
+                val uri = similaritySourceUri
+                when {
+                    id != null -> imageSearch.findByMediaId(id, query)
+                    uri != null -> imageSearch.findByUri(uri, query)
+                    else -> emptyList()
+                }
+            }.getOrElse { emptyList() }
+            _similarityHits.value = hits
+            _similaritySearching.value = false
+        }
+    }
+
+    /** 识图页「从图库选图」用的候选：最近的一批图片。 */
+    suspend fun searchSourceCandidates(limit: Int = 60): List<MediaEntity> =
+        repository.byIds(repository.ids(SortOrder.DATE_DESC, false).take(limit))
+
+    /** 联网识图：成功返回 resultUrl 交给 UI 打开浏览器，失败返回 message。 */
+    suspend fun onlineImageSearch(provider: ReverseImageProvider): OnlineSearchResult {
+        val uri = similaritySourceUri ?: similaritySourceId?.let { MediaUris.of(it) }
+            ?: return OnlineSearchResult(provider, false, null, "请先选择一张图片")
+        return runCatching { onlineSearchClient.search(uri, provider) }
+            .getOrElse { OnlineSearchResult(provider, false, null, "联网识图失败：" + (it.message ?: "网络异常")) }
+    }
 
     companion object {
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {

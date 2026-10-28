@@ -68,10 +68,18 @@ class MediaStoreDataSource(private val context: Context) {
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idIdx)
-                val data = if (cursor.isNull(dataIdx)) null else cursor.getString(dataIdx)
+                // 空字符串与 null 一样视为"没有 DATA"：个别 ROM 会返回 ""，直接当路径用会写出假行。
+                val data = if (cursor.isNull(dataIdx)) null else cursor.getString(dataIdx)?.takeIf { it.isNotBlank() }
                 val name = cursor.getString(nameIdx) ?: "IMG_$id"
-                val relativePath = cursor.getString(relativeIdx) ?: ""
-                val path = data ?: File(relativePath, name).absolutePath
+                // DATA 是文件系统里的真实路径，大小写可靠，优先用它反推相对目录；
+                // 只有 DATA 为空时才回落到 RELATIVE_PATH，并按卷根下的真实目录名修正顶层大小写。
+                val relativeFromData = data?.let { StoragePaths.relativePathOf(it) }
+                val relativePath = relativeFromData ?: PathCase.canonicalize(
+                    cursor.getString(relativeIdx) ?: "",
+                    StoragePaths.primaryRoot(),
+                )
+                // DATA 为空时用 File(relativePath, name) 会拼出进程工作目录下的假路径，改用卷根拼接。
+                val path = data ?: File(StoragePaths.primaryRoot(), relativePath + name).absolutePath
                 val modifiedSecs = cursor.getLong(modifiedIdx)
                 val taken = cursor.getLong(takenIdx).takeIf { it > 0 } ?: modifiedSecs * 1000
                 val bucketName = cursor.getString(bucketNameIdx)

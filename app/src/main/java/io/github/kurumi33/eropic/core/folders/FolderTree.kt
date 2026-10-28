@@ -151,3 +151,83 @@ object FolderTreeBuilder {
     private fun splitSegments(relativePath: String): List<String> =
         relativePath.split('/').filter { it.isNotBlank() }
 }
+
+/** 面包屑的一节：path 为该层目录（以 "/" 结尾，根层级是空串），name 为显示名。 */
+data class FolderCrumb(
+    val path: String,
+    val name: String,
+)
+
+/**
+ * 把目录路径拆成面包屑：首项永远是根层级（path=""、name="根目录"），末项就是当前层。
+ *
+ * "DCIM/Camera/" → [根目录 "", DCIM "DCIM/", Camera "DCIM/Camera/"]
+ */
+fun breadcrumbsOf(path: String): List<FolderCrumb> {
+    val crumbs = mutableListOf(FolderCrumb(path = "", name = "根目录"))
+    var accumulated = ""
+    for (segment in splitFolderPath(path)) {
+        accumulated = accumulated + segment + "/"
+        crumbs += FolderCrumb(path = accumulated, name = segment)
+    }
+    return crumbs
+}
+
+/**
+ * 上一级目录：根层级的上一级不存在（返回 null），"DCIM/" 的上一级是根层级（返回 ""）。
+ */
+fun parentFolderPath(path: String): String? {
+    if (path.isEmpty()) return null
+    val segments = splitFolderPath(path)
+    if (segments.size <= 1) return ""
+    return segments.dropLast(1).joinToString(separator = "") { "$it/" }
+}
+
+/** 在树里按 path 找节点（只用于从保存下来的路径还原选中项，节点数不多，递归足够）。 */
+fun findFolderNode(nodes: List<FolderNode>, path: String): FolderNode? {
+    for (node in nodes) {
+        if (node.path == path) return node
+        val found = findFolderNode(node.children, path)
+        if (found != null) return found
+    }
+    return null
+}
+
+/** 某个目录聚合出来的统计值（张数 + 字节数）。 */
+data class FolderStats(
+    val count: Long,
+    val bytes: Long,
+)
+
+/**
+ * 统计某个目录的张数与大小。
+ *
+ * - path 为空（根层级）：把所有顶层节点加起来，相当于整库合计；
+ * - includeSubfolders = true 取 total（含子孙），false 只取直系。
+ */
+fun folderStatsOf(
+    nodes: List<FolderNode>,
+    path: String,
+    includeSubfolders: Boolean,
+): FolderStats {
+    if (path.isEmpty()) {
+        var count = 0L
+        var bytes = 0L
+        for (node in nodes) {
+            count += node.totalCount
+            bytes += node.totalBytes
+        }
+        return FolderStats(count = count, bytes = bytes)
+    }
+    val node = findFolderNode(nodes, path) ?: return FolderStats(count = 0L, bytes = 0L)
+    return if (includeSubfolders) {
+        FolderStats(count = node.totalCount, bytes = node.totalBytes)
+    } else {
+        FolderStats(count = node.directCount, bytes = node.directBytes)
+    }
+}
+
+/** 按 "/" 切分路径，忽略空段；内部与建树用的是同一套规则。 */
+internal fun splitFolderPath(path: String): List<String> =
+    path.split('/').filter { it.isNotBlank() }
+

@@ -158,7 +158,9 @@ fun FolderManagerScreen(
         )
 
         if (!hasWriteAccess) {
+            // 整块可点：用户反馈过"别处需要授权时点那一处文字应能跳到该设置项"。
             Card(
+                onClick = { viewModel.openScreen(io.github.kurumi33.eropic.ui.AppScreen.Permission) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -168,7 +170,7 @@ fun FolderManagerScreen(
                 ),
             ) {
                 Text(
-                    text = "未授予「所有文件访问」权限：新建与删除目录已禁用，请到「设置 → 存储权限」授权。",
+                    text = "未授予「所有文件访问」权限：新建与删除目录已禁用。点这里去授权。",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(12.dp),
                 )

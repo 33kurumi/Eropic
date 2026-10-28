@@ -29,8 +29,42 @@ object StoragePaths {
         return primary
     }
 
-    /** 某卷的回收站目录。 */
+    /**
+     * 从绝对路径反推 MediaStore 风格的相对目录（含结尾斜杠；文件就在卷根时返回空串）。
+     *
+     * 用来修正 RELATIVE_PATH 的大小写：DATA 绝对路径是文件系统里的真实名字，比 RELATIVE_PATH 可靠。
+     * 返回 null 表示路径不在任何已知卷内，调用方应回落到 RELATIVE_PATH。
+     *
+     * /storage/emulated/0/Pictures/Camera/a.jpg -> "Pictures/Camera/"
+     * /storage/emulated/0/a.jpg -> ""
+     */
+    fun relativePathOf(absolutePath: String): String? {
+        val trimmed = absolutePath.trimEnd('/')
+        val root = volumeRootOf(trimmed)
+        if (trimmed == root) return ""
+        if (!trimmed.startsWith(root + "/")) return null
+        val rest = trimmed.substring(root.length + 1)
+        val slash = rest.lastIndexOf('/')
+        return if (slash < 0) "" else rest.substring(0, slash + 1)
+    }
+
+    /** 某卷的默认回收站目录（<卷根>/.EropicTrash）。 */
     fun trashDir(root: String): File = File(root, TRASH_DIR_NAME)
+
+    /**
+     * 用户自定义位置的回收站目录（v0.2）。
+     *
+     * [relativeDir] 是相对卷根的目录，可以只给父目录（"Pictures"）也可以给完整目录
+     * （"Pictures/.EropicTrash"）；为空时退回默认位置。末级不是 [TRASH_DIR_NAME] 时自动补上，
+     * 避免回收站文件直接撒进用户的相册目录。
+     */
+    fun trashDir(root: String, relativeDir: String): File {
+        val segments = relativeDir.trim().replace('\\', '/').trim('/')
+            .split('/').filter { it.isNotEmpty() && it != "." && it != ".." }
+        if (segments.isEmpty()) return File(root, TRASH_DIR_NAME)
+        val withLeaf = if (segments.last() == TRASH_DIR_NAME) segments else segments + TRASH_DIR_NAME
+        return File(root, withLeaf.joinToString("/"))
+    }
 
     /** 同目录重名时追加 " (1)"、" (2)" …… */
     fun uniqueName(name: String, suffix: Int): String {

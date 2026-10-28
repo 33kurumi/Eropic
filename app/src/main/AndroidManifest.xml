@@ -12,6 +12,9 @@
     <!-- Android 14+ 用户可能只授权部分照片，必须能感知这种状态 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- v0.2 联网识图（以图搜图）需要访问网络；本地识图与其余功能完全离线可用。
+         除用户主动点「联网搜图」外，应用不会发起任何网络请求（ADR-0006 仍然成立：没有自动上传/云同步）。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- 查看器里「设为壁纸」需要，属于普通权限，不弹窗、不需用户手动授权 -->
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
     <!-- M3 真实移动/回收站/永久删除需要"所有文件访问"。Eropic 只侧载分发、不上架 Play，

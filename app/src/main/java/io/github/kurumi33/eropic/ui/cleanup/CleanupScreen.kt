@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -49,8 +50,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
-import io.github.kurumi33.eropic.core.cleanup.KeepCandidate
 import io.github.kurumi33.eropic.core.cleanup.KeepSuggestion
+import io.github.kurumi33.eropic.core.cleanup.QualityScorer
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.index.IndexPhase
@@ -93,6 +94,9 @@ fun CleanupScreen(
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
+    // 入口区展示回收站概览：v0.2 起回收站从底栏移出，这里是最显眼的入口。
+    val trashCount by viewModel.trashCount.collectAsStateWithLifecycle()
+    val trashTotalBytes by viewModel.trashTotalBytes.collectAsStateWithLifecycle()
 
     var category by rememberSaveable { mutableStateOf(CleanupCategory.DUPLICATES) }
     var filterState by remember { mutableStateOf(FilterUiState()) }
@@ -205,6 +209,9 @@ fun CleanupScreen(
         TopAppBar(
             title = { Text("清理") },
             actions = {
+                IconButton(onClick = { viewModel.openScreen(AppScreen.Trash) }) {
+                    Icon(imageVector = Icons.Filled.Delete, contentDescription = "回收站")
+                }
                 TextButton(onClick = { viewModel.openScreen(AppScreen.CleanupReport) }) {
                     Text("清理报告")
                 }
@@ -236,6 +243,14 @@ fun CleanupScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item { IndexCard(indexState, onStart = viewModel::startIndex, onCancel = viewModel::cancelIndex) }
+            item {
+                EntryArea(
+                    trashCount = trashCount,
+                    trashTotalBytes = trashTotalBytes,
+                    onOpenTrash = { viewModel.openScreen(AppScreen.Trash) },
+                    onOpenImageFind = { viewModel.openScreen(AppScreen.ImageFind) },
+                )
+            }
             item { ReadOnlyNotice() }
 
             when (val current = content) {
@@ -265,11 +280,12 @@ fun CleanupScreen(
                         item { EmptyHint() }
                     } else {
                         items(current.groups, key = { it.groupId }) { group ->
-                            GroupCard(
+                            QualityGroupItem(
                                 group = group,
                                 loadMembers = viewModel::members,
                                 loadThumbnail = viewModel::thumbnailFile,
                                 hasWriteAccess = hasWriteAccess,
+                                onOpenViewer = onOpenViewer,
                                 onCompare = { compareGroupId = group.groupId },
                                 onApplyKeep = { suggestion ->
                                     scope.launch {
@@ -375,110 +391,110 @@ private fun ReadOnlyNotice() {
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(text = "不自动删除", style = MaterialTheme.typography.titleSmall)
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(text = "不自动删除 · 只做检索", style = MaterialTheme.typography.titleSmall)
+            // 说明文字用小字号压缩到两行以内：这句是免责声明，不该挤占首屏空间。
             Text(
-                text = "Eropic 只负责找候选，不会自动删除或移动任何文件。" +
-                    "所有写操作都要你逐组确认；删除只是移入回收站，30 天内可随时恢复。",
+                text = "写操作都需你确认；删除只是移入回收站，30 天内可恢复。",
                 style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
 }
 
+/**
+ * 清理页顶部的两个快捷入口。
+ *
+ * v0.2 起回收站不再在底栏，这里是最显眼的入口；识图（本地相似图 + 联网搜图）
+ * 同样只从清理页进入，所以两张卡并排放在首屏。
+ */
 @Composable
-private fun GroupCard(
+private fun EntryArea(
+    trashCount: Int,
+    trashTotalBytes: Long,
+    onOpenTrash: () -> Unit,
+    onOpenImageFind: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        EntryCard(
+            title = "回收站",
+            subtitle = "${formatCount(trashCount.toLong())} 项 · ${formatBytes(trashTotalBytes)} · 保留 30 天",
+            onClick = onOpenTrash,
+            modifier = Modifier.weight(1f),
+        )
+        EntryCard(
+            title = "识图",
+            subtitle = "以图搜图 · 本地 + 联网",
+            onClick = onOpenImageFind,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun EntryCard(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(onClick = onClick, modifier = modifier) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(text = title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/**
+ * 分组卡的数据壳：先异步加载成员，再用 [QualityScorer] 算出保留建议，最后交给
+ * [QualityGroupCard] 渲染。评分放在这里而不是卡片内部，是为了让 CleanupScreen 的
+ * 一键应用逻辑（移入回收站 + Snackbar 撤销 + 刷新）保持集中。
+ */
+@Composable
+private fun QualityGroupItem(
     group: DuplicateGroupEntity,
     loadMembers: suspend (Long) -> List<MediaEntity>,
     loadThumbnail: suspend (MediaEntity) -> File?,
     hasWriteAccess: Boolean,
+    onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
     onCompare: () -> Unit,
     onApplyKeep: (KeepSuggestion) -> Unit,
 ) {
     val members by produceState(initialValue = emptyList<MediaEntity>(), group.groupId) {
         value = loadMembers(group.groupId)
     }
-    val isExact = group.kind == DuplicateScanner.KIND_EXACT
-    var showKeepDialog by remember { mutableStateOf(false) }
-    if (showKeepDialog) {
-        KeepStrategyDialog(
-            candidates = members.map {
-                KeepCandidate(
-                    id = it.id,
-                    sizeBytes = it.sizeBytes,
-                    dateTakenMs = it.dateTakenMs,
-                    path = it.path,
-                )
-            },
-            onDismiss = { showKeepDialog = false },
-            onApply = { suggestion ->
-                showKeepDialog = false
-                onApplyKeep(suggestion)
-            },
-        )
-    }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = if (isExact) "精确重复" else "相似图片",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (isExact) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = " · ${group.memberCount} 张 · 可释放 ${formatBytes(group.reclaimableBytes)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (!isExact) {
-                Text(
-                    text = "相似度参考：dHash 最大距离 ${group.maxDistance}/64",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(members, key = { it.id }) { media ->
-                    GroupThumb(media = media, loadThumbnail = loadThumbnail)
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onCompare, enabled = members.size >= 2) { Text("对比预览") }
-                TextButton(
-                    onClick = { showKeepDialog = true },
-                    enabled = hasWriteAccess && members.size >= 2,
-                ) { Text("选择保留") }
-                if (!hasWriteAccess) {
-                    Text(
-                        text = "未授予「所有文件访问」权限，写操作已禁用",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun GroupThumb(media: MediaEntity, loadThumbnail: suspend (MediaEntity) -> File?) {
-    val thumb by produceState<File?>(initialValue = null, media.id, media.sizeBytes) {
-        value = loadThumbnail(media)
-    }
-    Box(
-        modifier = Modifier
-            .size(76.dp)
-            .clip(RoundedCornerShape(8.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        AsyncImage(
-            model = thumb?.let { android.net.Uri.fromFile(it) } ?: MediaUris.of(media.id),
-            contentDescription = media.displayName,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-        )
-    }
+    // 成员是同一批对象时才复用评分结果，避免每次重组都重算。
+    val assessment = remember(members) { QualityScorer.assess(members) }
+    val ids = remember(members) { members.map { it.id } }
+    QualityGroupCard(
+        group = group,
+        members = members,
+        assessment = assessment,
+        loadThumbnail = loadThumbnail,
+        onOpenViewer = { media ->
+            val index = ids.indexOf(media.id).coerceAtLeast(0)
+            onOpenViewer(ids, index)
+        },
+        onCompare = onCompare,
+        onApplyKeep = onApplyKeep,
+        hasWriteAccess = hasWriteAccess,
+    )
 }
 
 @Composable

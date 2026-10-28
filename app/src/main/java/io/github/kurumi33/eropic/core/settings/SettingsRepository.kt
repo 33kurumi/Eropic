@@ -26,7 +26,8 @@ class SettingsRepository(private val context: Context) {
         val THUMBNAIL_CACHE_MB = intPreferencesKey("thumbnail_cache_mb")
         val THUMBNAIL_BACKFILL_CHARGING_ONLY = booleanPreferencesKey("thumbnail_backfill_charging_only")
         val AUTO_RESUME_INDEX = booleanPreferencesKey("auto_resume_index")
-        val DATE_GROUPING = booleanPreferencesKey("date_grouping")
+        val DATE_GROUP_MODE = stringPreferencesKey("date_group_mode")
+        val TRASH_RELATIVE_DIR = stringPreferencesKey("trash_relative_dir")
         val SLIDESHOW_INTERVAL = intPreferencesKey("slideshow_interval")
         val RETENTION_DAYS = intPreferencesKey("retention_days")
         val SIMILARITY = stringPreferencesKey("similarity")
@@ -49,7 +50,8 @@ class SettingsRepository(private val context: Context) {
             thumbnailBackfillChargingOnly = prefs[Keys.THUMBNAIL_BACKFILL_CHARGING_ONLY]
                 ?: defaults.thumbnailBackfillChargingOnly,
             autoResumeIndex = prefs[Keys.AUTO_RESUME_INDEX] ?: defaults.autoResumeIndex,
-            dateGrouping = prefs[Keys.DATE_GROUPING] ?: defaults.dateGrouping,
+            dateGroupMode = DateGroupMode.fromName(prefs[Keys.DATE_GROUP_MODE]),
+            trashRelativeDir = prefs[Keys.TRASH_RELATIVE_DIR] ?: defaults.trashRelativeDir,
             slideshowIntervalSec = (prefs[Keys.SLIDESHOW_INTERVAL] ?: defaults.slideshowIntervalSec)
                 .coerceIn(MIN_SLIDESHOW_SEC, MAX_SLIDESHOW_SEC),
             retention = RetentionOption.fromDays(prefs[Keys.RETENTION_DAYS] ?: defaults.retention.days),
@@ -84,8 +86,24 @@ class SettingsRepository(private val context: Context) {
     suspend fun setAutoResumeIndex(enabled: Boolean) =
         context.settingsDataStore.edit { it[Keys.AUTO_RESUME_INDEX] = enabled }
 
+    /** v0.2：图库时间分组粒度。 */
+    suspend fun setDateGroupMode(mode: DateGroupMode) =
+        context.settingsDataStore.edit { it[Keys.DATE_GROUP_MODE] = mode.name }
+
+    /** 兼容 M4 的布尔入口：true = 按月，false = 不分组。 */
     suspend fun setDateGrouping(enabled: Boolean) =
-        context.settingsDataStore.edit { it[Keys.DATE_GROUPING] = enabled }
+        setDateGroupMode(if (enabled) DateGroupMode.MONTH else DateGroupMode.NONE)
+
+    /**
+     * v0.2：设置回收站目录（相对主存储根）。
+     *
+     * 规范化规则：去掉首尾空白与斜杠、拒绝绝对路径与 ".."、末级不是 .EropicTrash 时自动补上；
+     * 非法输入或空串一律当作"默认位置"（<卷根>/.EropicTrash）。
+     */
+    suspend fun setTrashRelativeDir(relativeDir: String) {
+        val normalized = normalizeTrashDir(relativeDir)
+        context.settingsDataStore.edit { it[Keys.TRASH_RELATIVE_DIR] = normalized }
+    }
 
     suspend fun setSlideshowInterval(seconds: Int) =
         context.settingsDataStore.edit { it[Keys.SLIDESHOW_INTERVAL] = seconds.coerceIn(MIN_SLIDESHOW_SEC, MAX_SLIDESHOW_SEC) }
@@ -125,6 +143,21 @@ class SettingsRepository(private val context: Context) {
         const val DIR_SEPARATOR = "\n"
         const val MIN_SLIDESHOW_SEC = 1
         const val MAX_SLIDESHOW_SEC = 15
+
+        /** 回收站目录规范化：只允许主存储根下的相对路径，末级固定为 .EropicTrash。 */
+        fun normalizeTrashDir(raw: String): String {
+            val trimmed = raw.trim().replace('\\', '/').trim('/')
+            if (trimmed.isEmpty()) return ""
+            if (trimmed.startsWith("/")) return ""
+            val segments = trimmed.split('/').filter { it.isNotEmpty() }
+            if (segments.any { it == "." || it == ".." }) return ""
+            val withLeaf = if (segments.last() == io.github.kurumi33.eropic.core.media.StoragePaths.TRASH_DIR_NAME) {
+                segments
+            } else {
+                segments + io.github.kurumi33.eropic.core.media.StoragePaths.TRASH_DIR_NAME
+            }
+            return withLeaf.joinToString("/")
+        }
 
         fun parseDirs(raw: String?): List<String> =
             raw?.split(DIR_SEPARATOR)?.map { it.trim().trim('/') }?.filter { it.isNotEmpty() }?.distinct()

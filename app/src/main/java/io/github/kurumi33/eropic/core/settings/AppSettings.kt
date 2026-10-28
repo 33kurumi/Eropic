@@ -39,6 +39,22 @@ enum class SimilarityLevel(val label: String, val dhashThreshold: Int, val phash
     }
 }
 
+/**
+ * 图库按时间分组的方式（用户要求：默认按月，可切成按日，也可关掉）。
+ *
+ * 折叠/展开交互在 ui/gallery/GalleryScreen.kt 里实现，这里只负责持久化。
+ */
+enum class DateGroupMode(val label: String) {
+    NONE("不分组"),
+    MONTH("按月"),
+    DAY("按日"),
+    ;
+
+    companion object {
+        fun fromName(raw: String?): DateGroupMode = entries.firstOrNull { it.name == raw } ?: MONTH
+    }
+}
+
 /** 用户可调的界面与行为设置（全部本地保存在 DataStore）。 */
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
@@ -57,8 +73,10 @@ data class AppSettings(
     val thumbnailBackfillChargingOnly: Boolean = true,
     /** 启动时自动续算被打断的指纹任务（只续算，不会在全新安装上擅自开始全量扫描）。 */
     val autoResumeIndex: Boolean = true,
-    /** M4：图库网格是否按拍摄日期插入分组标题。 */
-    val dateGrouping: Boolean = true,
+    /** v0.2：图库按时间分组的粒度（不分组 / 按月 / 按日）。 */
+    val dateGroupMode: DateGroupMode = DateGroupMode.MONTH,
+    /** v0.2：回收站目录（相对主存储根；空串 = <卷根>/.EropicTrash）。 */
+    val trashRelativeDir: String = "",
     /** M4：全屏查看器幻灯片间隔（秒）。 */
     val slideshowIntervalSec: Int = 3,
     /** M4：回收站保留时长。 */
@@ -70,6 +88,9 @@ data class AppSettings(
     /** M4：扫描时排除的目录（相对路径，不带结尾斜杠）。 */
     val scanExcludedDirs: List<String> = emptyList(),
 ) {
+    /** 兼容 M4 的布尔语义：是否插入日期分组标题（= 分组粒度不是"不分组"）。 */
+    val dateGrouping: Boolean get() = dateGroupMode != DateGroupMode.NONE
+
     /** 扫描范围；数据源与索引协调器都从这里取，避免两处规则不一致。 */
     fun scanScope(): io.github.kurumi33.eropic.core.index.ScanScope = io.github.kurumi33.eropic.core.index.ScanScope(
         includeHidden = scanIncludeHidden,

@@ -1,10 +1,8 @@
 package io.github.kurumi33.eropic.ui.folders
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,7 +14,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -26,8 +26,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -40,16 +40,22 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.core.folders.FolderNode
 import io.github.kurumi33.eropic.core.folders.FolderTreeBuilder
+import io.github.kurumi33.eropic.core.folders.findFolderNode
+import io.github.kurumi33.eropic.core.folders.parentFolderPath
+import io.github.kurumi33.eropic.core.folders.splitFolderPath
 import io.github.kurumi33.eropic.core.model.FolderRow
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 
 /**
- * 「文件夹」页：按真实目录树展示相册，支持逐级展开/收起，点按进入文件夹详情。
+ * 「文件夹」页：列表（目录树）与网格（文件夹卡片）两种浏览方式。
  *
- * 树形列表用扁平化实现：把树按展开状态摊平成 List<FolderNode> 再交给 LazyColumn，
- * 这样长列表也能保持懒加载。
+ * - 列表模式：把树按展开状态摊平成 List<FolderNode> 交给 LazyColumn，长列表也能懒加载；
+ * - 网格模式：只展示当前这一层的子文件夹卡片（封面 + 名字 + 张数 + 大小），可以逐级下钻，
+ *   顶部有返回上一级、面包屑，以及「查看本层全部图片」和「包含子文件夹」两个入口。
+ *
+ * 两种模式的浏览位置都用 rememberSaveable 保存，转屏、切 Tab 都不会丢。
  */
 @Composable
 fun FoldersSection(
@@ -58,11 +64,18 @@ fun FoldersSection(
     hasWriteAccess: Boolean = false,
 ) {
     // 展开状态以 node.path 为 key；默认全部收起，点箭头才展开。
-    // 用可保存的 List<String> 而不是 mutableStateMapOf：后者旋转屏幕就全丢了。
+    // 用可保存的 List<String> 而不是 mutableStateMapOf：后者一旋转屏幕就全丢了。
     var expandedPaths by rememberSaveable { mutableStateOf(listOf<String>()) }
     val expanded = remember(expandedPaths) { expandedPaths.associateWith { true } }
     var selectedPath by rememberSaveable { mutableStateOf<String?>(null) }
-    // 索引/后台同步完成后要重新查一次目录聚合，否则停在文件夹页时张数永远不更新。
+
+    // 网格模式的状态：是否网格 / 当前层级（"" = 根层级）/ 是否聚合子目录 / 是否在看图片。
+    var gridLayout by rememberSaveable { mutableStateOf(false) }
+    var gridPath by rememberSaveable { mutableStateOf("") }
+    var gridIncludeSubfolders by rememberSaveable { mutableStateOf(false) }
+    var gridShowImages by rememberSaveable { mutableStateOf(false) }
+
+    // 索引或后台同步结束后要重新查一次目录聚合，否则停在文件夹页时张数永远不更新。
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val rows by produceState(
         initialValue = emptyList<FolderRow>(),
@@ -73,23 +86,36 @@ fun FoldersSection(
     }
     val tree = remember(rows) { FolderTreeBuilder.build(rows) }
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    // 目录可能随索引刷新而消失：按 path 从当前树里重新查节点，查不到就回到列表。
+
+    // 列表模式：目录可能随索引刷新而消失，查不到就退回根列表。
     val selectedNode = remember(tree, selectedPath) {
         selectedPath?.let { path -> findFolderNode(tree, path) }
     }
+    // 网格模式同理：当前层级不存在了（目录被删、改名或索引重置）就退回根层级。
+    LaunchedEffect(tree, gridPath) {
+        if (gridPath.isNotEmpty() && tree.isNotEmpty() && findFolderNode(tree, gridPath) == null) {
+            gridPath = ""
+            gridShowImages = false
+        }
+    }
 
-    val node = selectedNode
-    if (node != null) {
-        FolderDetailScreen(
+    when {
+        // 还没有索引：给提示，同时保留布局切换入口，避免空库里什么都点不了。
+        tree.isEmpty() -> EmptyFoldersScaffold(
+            gridLayout = gridLayout,
+            onToggleLayout = { gridLayout = !gridLayout },
+        )
+
+        !gridLayout && selectedNode != null -> FolderDetailScreen(
             viewModel = viewModel,
-            folderPath = node.path,
-            folderName = node.name,
+            folderPath = selectedNode.path,
+            folderName = selectedNode.name,
             onBack = { selectedPath = null },
             onOpenViewer = onOpenViewer,
             hasWriteAccess = hasWriteAccess,
         )
-    } else {
-        FolderTreeContent(
+
+        !gridLayout -> FolderTreeContent(
             tree = tree,
             showMeta = settings.showMeta,
             expanded = expanded,
@@ -97,10 +123,43 @@ fun FoldersSection(
                 expandedPaths = if (path in expandedPaths) expandedPaths - path else expandedPaths + path
             },
             onOpenFolder = { path -> selectedPath = path },
+            onSwitchToGrid = {
+                gridLayout = true
+                gridShowImages = false
+            },
+        )
+
+        // 网格里点「查看本层全部图片」：复用详情页的大网格（含多选、移动、回收站）。
+        gridShowImages -> FolderDetailScreen(
+            viewModel = viewModel,
+            folderPath = gridPath,
+            folderName = folderNameOf(tree, gridPath),
+            onBack = { gridShowImages = false },
+            onOpenViewer = onOpenViewer,
+            hasWriteAccess = hasWriteAccess,
+            initialIncludeSubfolders = gridIncludeSubfolders,
+        )
+
+        else -> FolderGridScreen(
+            viewModel = viewModel,
+            tree = tree,
+            path = gridPath,
+            includeSubfolders = gridIncludeSubfolders,
+            refreshToken = indexState.finishedAtMs,
+            onToggleIncludeSubfolders = { checked -> gridIncludeSubfolders = checked },
+            onOpenFolder = { path -> gridPath = path },
+            onUp = { parentFolderPath(gridPath)?.let { parent -> gridPath = parent } },
+            onOpenImages = { gridShowImages = true },
+            onSwitchToList = {
+                gridLayout = false
+                gridShowImages = false
+            },
+            onOpenViewer = onOpenViewer,
         )
     }
 }
 
+/** 列表模式：目录树 + 顶栏的布局切换按钮。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FolderTreeContent(
@@ -109,8 +168,10 @@ private fun FolderTreeContent(
     expanded: Map<String, Boolean>,
     onToggleExpand: (String) -> Unit,
     onOpenFolder: (String) -> Unit,
+    onSwitchToGrid: () -> Unit,
 ) {
-    // 按展开状态把树摊平成可见列表；读到 expanded 的 snapshot 值，展开/收起会自动重组。
+    // 按展开状态把树摊平成"可见节点"列表：LazyColumn 只组合可见行，展开一万个节点也不卡。
+    // 这里读到 expanded 的快照值，展开/收起会自动触发重组。
     val visibleNodes = ArrayList<FolderNode>(tree.size)
     fun appendVisible(nodes: List<FolderNode>) {
         for (node in nodes) {
@@ -136,29 +197,27 @@ private fun FolderTreeContent(
                     )
                 }
             },
-        )
-
-        if (tree.isEmpty()) {
-            EmptyFolders()
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(vertical = 4.dp),
-            ) {
-                items(items = visibleNodes, key = { it.path }) { node ->
-                    FolderRowItem(
-                        node = node,
-                        expanded = expanded[node.path] == true,
-                        showMeta = showMeta,
-                        onToggleExpand = { onToggleExpand(node.path) },
-                        onClick = { onOpenFolder(node.path) },
-                    )
+            actions = {
+                IconButton(onClick = onSwitchToGrid) {
+                    Icon(imageVector = Icons.Filled.GridView, contentDescription = "切换为网格视图")
                 }
+            },
+        )
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(items = visibleNodes, key = { node -> node.path }) { node ->
+                FolderRowItem(
+                    node = node,
+                    expanded = expanded[node.path] == true,
+                    showMeta = showMeta,
+                    onToggleExpand = { onToggleExpand(node.path) },
+                    onClick = { onOpenFolder(node.path) },
+                )
             }
         }
     }
 }
 
+/** 目录树的一行：缩进按深度，左侧文件夹图标，右侧展开箭头，点击进入详情。 */
 @Composable
 private fun FolderRowItem(
     node: FolderNode,
@@ -171,10 +230,9 @@ private fun FolderRowItem(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(start = (node.depth * 16).dp),
+            .padding(start = (node.depth * 16).dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 叶子节点也占住箭头的位置，保证同级目录的图标纵向对齐。
         Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
             if (node.children.isNotEmpty()) {
                 IconButton(onClick = onToggleExpand) {
@@ -190,61 +248,85 @@ private fun FolderRowItem(
             }
         }
         Icon(
-            imageVector = if (node.path.isEmpty()) Icons.Filled.PhotoLibrary else Icons.Filled.Folder,
+            imageVector = if (node.children.isEmpty()) Icons.Filled.PhotoLibrary else Icons.Filled.Folder,
             contentDescription = null,
+            modifier = Modifier.size(28.dp),
             tint = MaterialTheme.colorScheme.primary,
         )
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(vertical = 10.dp),
-        ) {
-            Text(
-                text = node.name,
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-            )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = node.name, style = MaterialTheme.typography.titleSmall)
             if (showMeta) {
                 Text(
-                    text = buildString {
-                        append(formatCount(node.totalCount))
-                        append(" 张 · ")
-                        append(formatBytes(node.totalBytes))
-                    },
+                    text = formatCount(node.totalCount) + " 张 · " + formatBytes(node.totalBytes),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
                 )
             }
         }
     }
 }
 
+/** 完全没有索引时的页面：保留布局切换入口，内容只给建立索引的提示。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EmptyFolders() {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(text = "还没有索引", style = MaterialTheme.typography.titleLarge)
-        Text(
-            text = "还没有索引，请先到图库页建立索引。",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 12.dp),
+private fun EmptyFoldersScaffold(
+    gridLayout: Boolean,
+    onToggleLayout: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        TopAppBar(
+            title = { Text(text = "文件夹") },
+            actions = {
+                IconButton(onClick = onToggleLayout) {
+                    Icon(
+                        imageVector = if (gridLayout) {
+                            Icons.AutoMirrored.Filled.List
+                        } else {
+                            Icons.Filled.GridView
+                        },
+                        contentDescription = if (gridLayout) "切换为列表视图" else "切换为网格视图",
+                    )
+                }
+            },
         )
+        EmptyFolders()
     }
 }
 
-/** 在树里按 path 找节点；找不到返回 null。 */
-private fun findFolderNode(nodes: List<FolderNode>, path: String): FolderNode? {
-    for (node in nodes) {
-        if (node.path == path) return node
-        val found = findFolderNode(node.children, path)
-        if (found != null) return found
+@Composable
+private fun EmptyFolders() {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
+            modifier = Modifier.padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.PhotoLibrary,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "还没有索引",
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            Text(
+                text = "请先到图库页建立索引。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
     }
-    return null
+}
+
+/** 从树里取某个路径的显示名；根层级或节点已消失时用路径末段兜底。 */
+private fun folderNameOf(tree: List<FolderNode>, path: String): String {
+    if (path.isEmpty()) return "根目录"
+    findFolderNode(tree, path)?.let { return it.name }
+    return splitFolderPath(path).lastOrNull() ?: path
 }

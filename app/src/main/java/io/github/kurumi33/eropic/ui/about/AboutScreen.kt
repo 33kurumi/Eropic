@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import io.github.kurumi33.eropic.BuildConfig
 import io.github.kurumi33.eropic.ui.EropicViewModel
 
 /**
@@ -78,6 +79,8 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    InfoRow("版本", versionName + "（versionCode " + BuildConfig.VERSION_CODE + "）")
+                    InfoRow("构建时间", formatBuildTime(BuildConfig.BUILD_TIME_MS))
                     InfoRow("包名", context.packageName)
                     InfoRow("系统", "Android " + Build.VERSION.RELEASE + "（API " + Build.VERSION.SDK_INT + "）")
                     InfoRow("设备", Build.MANUFACTURER + " " + Build.MODEL)
@@ -92,9 +95,10 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
                     Bullet("READ_MEDIA_VISUAL_USER_SELECTED", "Android 14+ 的「仅选择部分照片」访问。")
                     Bullet("MANAGE_EXTERNAL_STORAGE", "「所有文件访问」：真实移动、重命名、复制、移入回收站时才需要；未授权时这些按钮置灰。")
                     Bullet("POST_NOTIFICATIONS", "回收站到期提醒。可拒绝。")
+                    Bullet("INTERNET", "仅「识图 → 联网搜图」使用：把你要搜的那一张图上传到你选的服务。不点它就不会联网。")
                     Text(
                         text = "后台补充权限（WAKE_LOCK、FOREGROUND_SERVICE、RECEIVE_BOOT_COMPLETED）由 WorkManager 依赖合并进来，" +
-                            "用于后台补齐缩略图与自动同步。Eropic 没有申请 INTERNET 权限，所以物理上无法上传任何图片。",
+                            "用于后台补齐缩略图与自动同步。除你在「识图」页主动点「联网搜图」外，Eropic 不会发起任何网络请求，也不会自动上传图片。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -107,7 +111,11 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
                     InfoRow("索引数据库", "应用私有目录（Room / SQLite），可随时重建")
                     InfoRow("缩略图缓存", thumbDir)
                     InfoRow("缓存根目录", cacheDir)
-                    InfoRow("回收站", "存储卷根目录 /.EropicTrash（带 .nomedia，不会被相册扫描到）")
+                    InfoRow(
+                        "回收站",
+                        "默认在存储卷根目录 /.EropicTrash（带 .nomedia，不会被相册扫描到），" +
+                            "可在「清理 → 回收站」里查看当前路径并更改",
+                    )
                     Text(
                         text = "卸载应用会一并删除数据库与缩略图缓存；但 /.EropicTrash 里的文件在卸载前请先恢复或清空，否则会成为普通隐藏文件。",
                         style = MaterialTheme.typography.bodySmall,
@@ -170,6 +178,13 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
             )
         }
     }
+}
+
+/** 构建时间戳 → 可读的本地时间（debug 包每次构建都不同，方便确认手机上装的是哪一版）。 */
+private fun formatBuildTime(ms: Long): String {
+    if (ms <= 0L) return "未知"
+    return java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA)
+        .format(java.util.Date(ms))
 }
 
 @Composable

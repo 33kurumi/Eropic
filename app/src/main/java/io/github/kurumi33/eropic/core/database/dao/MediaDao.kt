@@ -189,4 +189,16 @@ interface MediaDao {
     /** 真实移动文件后立刻改写索引里的位置，避免界面还显示旧目录（随后同步会再校正 MediaStore 新 id）。 */
     @Query("UPDATE media_item SET path = :path, relativePath = :relativePath, bucketId = :bucketId, bucketName = :bucketName WHERE id = :id")
     suspend fun updateLocation(id: Long, path: String, relativePath: String, bucketId: Long, bucketName: String)
+
+    /**
+     * 文件夹封面：取该目录（含所有子目录）里最新的一张照片。
+     *
+     * [pattern] 要传"转义后的目录前缀 + %"，例如 "DCIM/Camera/%"；目录本身以 "/" 结尾，
+     * 所以只会命中它自己的图片和它子目录里的图片，不会误匹配到 "DCIM/Camera2/"。
+     */
+    @Query(
+        "SELECT * FROM media_item WHERE isPresent = 1 AND relativePath LIKE :pattern ESCAPE '\\' " +
+            "ORDER BY dateTakenMs DESC, id DESC LIMIT 1"
+    )
+    suspend fun folderCover(pattern: String): MediaEntity?
 }

@@ -12,10 +12,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -36,6 +38,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,12 +49,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.media.SortOrder
+import io.github.kurumi33.eropic.core.settings.DateGroupMode
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
-import io.github.kurumi33.eropic.ui.components.GalleryGrid
 import io.github.kurumi33.eropic.ui.components.SelectionTopBar
 import io.github.kurumi33.eropic.ui.components.shareImages
 import io.github.kurumi33.eropic.ui.trash.MoveDialog
@@ -76,11 +80,19 @@ fun GalleryScreen(
     val favoritesOnly by viewModel.favoritesOnly.collectAsStateWithLifecycle()
     val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
 
-    // 图库网格用带日期分组标题的行数据；捏合改列数只覆盖本次浏览，不回写设置。
-    val rows = viewModel.galleryRows.collectAsLazyPagingItems()
+    // 网格直接用原始照片流：日期标题行由 GalleryDisplayGrid 按当前"显示方式"动态生成，
+    // 这样标题行才能点击折叠（旧的 viewModel.galleryRows 把标题写死在分页数据里，删不掉也折叠不了）。
+    val pagingItems = viewModel.media.collectAsLazyPagingItems()
+    // 捏合改列数只覆盖本次浏览，不回写设置。
     var columnOverride by remember { mutableStateOf<Int?>(null) }
     val columns = (columnOverride ?: settings.gridColumns).coerceIn(3, 8)
     LaunchedEffect(settings.gridColumns) { columnOverride = null }
+
+    // 已折叠的分组键（日期键，见 GalleryGroupDates）；rememberSaveable 让旋转屏幕后仍然保持折叠。
+    var collapsedGroupKeys by rememberSaveable(stateSaver = CollapsedKeysSaver) {
+        mutableStateOf<Set<String>>(emptySet())
+    }
+    var groupMenuOpen by remember { mutableStateOf(false) }
 
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val selectionActive = selectedIds.isNotEmpty()
@@ -167,6 +179,7 @@ fun GalleryScreen(
                         }
                         DropdownMenu(expanded = moreMenuOpen, onDismissRequest = { moreMenuOpen = false }) {
                             listOf(
+                                "以图搜图" to AppScreen.ImageFind,
                                 "搜索图片" to AppScreen.Search,
                                 "存储总览" to AppScreen.Storage,
                                 "操作历史" to AppScreen.History,
@@ -203,6 +216,36 @@ fun GalleryScreen(
                 onClick = { if (!favoritesOnly) viewModel.toggleFavoritesFilter() },
                 label = { Text("收藏") },
             )
+            Spacer(Modifier.weight(1f))
+            // "显示方式"：按月 / 按日 / 不分组，立即生效并写回设置（下次打开还是这一档）。
+            Box {
+                AssistChip(
+                    onClick = { groupMenuOpen = true },
+                    label = { Text("显示方式：" + settings.dateGroupMode.label) },
+                    trailingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.ArrowDropDown,
+                            contentDescription = null,
+                        )
+                    },
+                )
+                DropdownMenu(expanded = groupMenuOpen, onDismissRequest = { groupMenuOpen = false }) {
+                    DateGroupMode.entries.forEach { mode ->
+                        DropdownMenuItem(
+                            text = { Text(mode.label) },
+                            trailingIcon = {
+                                if (mode == settings.dateGroupMode) {
+                                    Icon(imageVector = Icons.Filled.Check, contentDescription = null)
+                                }
+                            },
+                            onClick = {
+                                viewModel.setDateGroupMode(mode)
+                                groupMenuOpen = false
+                            },
+                        )
+                    }
+                }
+            }
         }
 
         if (!access.full) {
@@ -212,7 +255,7 @@ fun GalleryScreen(
         IndexBanner(indexState = indexState, onRetry = viewModel::startIndex)
 
         when {
-            indexState.phase == IndexPhase.SYNCING && rows.itemCount == 0 -> {
+            indexState.phase == IndexPhase.SYNCING && pagingItems.itemCount == 0 -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
@@ -222,7 +265,7 @@ fun GalleryScreen(
                 }
             }
 
-            rows.itemCount == 0 -> {
+            pagingItems.itemCount == 0 -> {
                 EmptyGallery(
                     phase = indexState.phase,
                     favoritesOnly = favoritesOnly,
@@ -231,8 +274,20 @@ fun GalleryScreen(
             }
 
             else -> {
-                GalleryGrid(
-                    rows = rows,
+                GalleryDisplayGrid(
+                    items = pagingItems,
+                    mode = settings.dateGroupMode,
+                    // 只有按拍摄时间排序时同一月份才连续；其它排序下每个"月份段"各给一个标题
+                    // （键里带段号，避免 LazyGrid 重复 key 崩溃）。
+                    dateSorted = sortOrder == SortOrder.DATE_DESC || sortOrder == SortOrder.DATE_ASC,
+                    collapsedKeys = collapsedGroupKeys,
+                    onToggleGroup = { key ->
+                        collapsedGroupKeys = if (key in collapsedGroupKeys) {
+                            collapsedGroupKeys - key
+                        } else {
+                            collapsedGroupKeys + key
+                        }
+                    },
                     columns = columns,
                     thumbnailsEnabled = settings.thumbnailCacheEnabled,
                     selectedIds = selectedIds,
@@ -400,3 +455,14 @@ private fun EmptyGallery(
         }
     }
 }
+
+/**
+ * 折叠状态在 Bundle 里只能放 ArrayList，这里显式转一层。
+ *
+ * 键是日期字符串（"2026-10" / "2026-10-28"），与分页加载进度无关，
+ * 所以转屏、甚至滚动后重新组合都能恢复原来的折叠状态。
+ */
+private val CollapsedKeysSaver: Saver<Set<String>, ArrayList<String>> = Saver(
+    save = { ArrayList(it) },
+    restore = { it.toSet() },
+)

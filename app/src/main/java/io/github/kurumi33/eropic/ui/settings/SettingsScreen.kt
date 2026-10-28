@@ -1,5 +1,9 @@
 package io.github.kurumi33.eropic.ui.settings
 
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,9 +46,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.core.index.IndexPhase
-import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.settings.AppSettings
+import io.github.kurumi33.eropic.core.settings.DateGroupMode
 import io.github.kurumi33.eropic.core.settings.RetentionOption
 import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 import io.github.kurumi33.eropic.core.settings.ThemeMode
@@ -114,9 +118,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
             StorageAccessCard(
                 hasWriteAccess = hasWriteAccess,
-                onRequestAccess = {
-                    runCatching { context.startActivity(StorageAccess.requestIntent(context)) }
-                },
+                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
             )
 
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -154,7 +156,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(text = "关于", style = MaterialTheme.typography.titleMedium)
-                    Text(text = "Eropic " + versionName + " · 本地优先 · 无网络权限")
+                    Text(text = "Eropic " + versionName + " · 本地优先 · 仅「联网搜图」时联网")
                     Text(
                         text = "开源地址：github.com/33kurumi/Eropic",
                         style = MaterialTheme.typography.bodySmall,
@@ -361,12 +363,18 @@ private fun BackgroundCard(settings: AppSettings, viewModel: EropicViewModel) {
     }
 }
 
+/**
+ * 「文件权限」卡：整卡可点，进应用内的权限说明页（v0.2 不再一点就直接跳系统设置）。
+ *
+ * 不管是否已授权都显示按钮：已授权时用户同样需要一个地方去系统设置里改或关掉这项权限，
+ * 之前「已授权就隐藏按钮」会让用户找不到关闭入口。
+ */
 @Composable
 private fun StorageAccessCard(
     hasWriteAccess: Boolean,
-    onRequestAccess: () -> Unit,
+    onOpenPermission: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(onClick = onOpenPermission, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(text = "文件权限", style = MaterialTheme.typography.titleMedium)
             Text(
@@ -383,9 +391,7 @@ private fun StorageAccessCard(
                 text = "状态：" + if (hasWriteAccess) "已授予" else "未授予",
                 style = MaterialTheme.typography.bodyMedium,
             )
-            if (!hasWriteAccess) {
-                Button(onClick = onRequestAccess) { Text("去系统设置授权") }
-            }
+            OutlinedButton(onClick = onOpenPermission) { Text("权限说明与设置") }
         }
     }
 }
@@ -422,11 +428,20 @@ private fun GalleryViewCard(settings: AppSettings, viewModel: EropicViewModel) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(text = "图库与查看", style = MaterialTheme.typography.titleMedium)
 
-            SettingSwitchRow(
-                title = "按日期分组",
-                subtitle = "图库按拍摄月份插入分组标题；双指捏合仍可临时改列数。",
-                checked = settings.dateGrouping,
-                onCheckedChange = viewModel::setDateGrouping,
+            Text(text = "日期分组", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DateGroupMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = settings.dateGroupMode == mode,
+                        onClick = { viewModel.setDateGroupMode(mode) },
+                        label = { Text(mode.label) },
+                    )
+                }
+            }
+            Text(
+                text = "按月/按日会在图库里插入分组标题；不分组是一整块时间线。双指捏合仍可临时改列数。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             Text(text = "幻灯片间隔", style = MaterialTheme.typography.labelLarge)
@@ -499,6 +514,20 @@ private fun CleanupSettingsCard(settings: AppSettings, viewModel: EropicViewMode
 private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
     var draft by remember { mutableStateOf("") }
 
+    // 系统目录选择器：只取一次性的树 URI 用来算相对路径，不申请、也不持久化 URI 权限。
+    val browseLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            val relativeDir = treeUriToRelativePath(uri)
+            when {
+                relativeDir == null -> viewModel.postMessage("只支持主存储（内部共享存储）里的目录，外置 SD 卡暂不支持")
+                relativeDir.isEmpty() -> viewModel.postMessage("不能排除整个存储根目录，请选里面的子目录")
+                else -> viewModel.addScanExcludedDir(relativeDir)
+            }
+        }
+    }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(text = "扫描范围", style = MaterialTheme.typography.titleMedium)
@@ -550,6 +579,10 @@ private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
                     },
                 ) { Text("添加") }
             }
+            // 手动输入容易敲错，给一个走系统文件选择器的入口；选完仍会存成相对路径。
+            OutlinedButton(onClick = { browseLauncher.launch(null) }) {
+                Text("浏览选择目录…")
+            }
             Text(
                 text = "目录用相对路径（相对存储根）。改完在下次「增量扫描」生效，已索引的行不会自动移除。",
                 style = MaterialTheme.typography.labelSmall,
@@ -593,10 +626,30 @@ private fun MorePagesCard(viewModel: EropicViewModel) {
                     modifier = Modifier.weight(1f),
                 ) { Text("清理报告") }
                 OutlinedButton(
+                    onClick = { viewModel.openScreen(AppScreen.ImageFind) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("识图") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
                     onClick = { viewModel.openScreen(AppScreen.About) },
                     modifier = Modifier.weight(1f),
                 ) { Text("关于") }
             }
         }
     }
+}
+
+/**
+ * 把 SAF 选中的目录 URI 转成「相对存储根」的路径，例如 primary:Pictures/Camera → Pictures/Camera。
+ *
+ * 返回 null 表示选中的不是主存储（外置 SD 卡/云端等）；返回空串表示选中的就是存储根本身。
+ * 只读一次性的 documentId，不保存 URI，所以不需要 takePersistableUriPermission。
+ */
+private fun treeUriToRelativePath(uri: Uri): String? {
+    val documentId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull() ?: return null
+    val parts = documentId.split(":", limit = 2)
+    if (parts.size < 2) return null
+    if (parts[0] != "primary") return null
+    return parts[1].trim('/')
 }

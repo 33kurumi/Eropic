@@ -9,6 +9,7 @@ import io.github.kurumi33.eropic.core.fileops.OpItem
 import io.github.kurumi33.eropic.core.fileops.OperationPayload
 import io.github.kurumi33.eropic.core.media.MediaScanner
 import io.github.kurumi33.eropic.core.media.StoragePaths
+import io.github.kurumi33.eropic.core.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -24,6 +25,7 @@ import java.io.File
 class TrashRepository(
     private val context: Context,
     private val database: EropicDatabase,
+    private val settingsRepository: SettingsRepository,
 ) {
 
     private val mediaDao = database.mediaDao()
@@ -47,6 +49,34 @@ class TrashRepository(
     }
 
     suspend fun totalBytes(): Long = trashDao.totalBytes()
+
+    // ---- v0.2：回收站位置可见、可改（用户反馈"不知道回收站在哪、能不能换地方"） ----
+
+    /** 按用户设置算出某个卷上的回收站目录；设置读取失败时退回 <卷根>/.EropicTrash。 */
+    private suspend fun resolveTrashDir(root: String): File {
+        val relative = runCatching { settingsRepository.current().trashRelativeDir }.getOrDefault("")
+        return StoragePaths.trashDir(root, relative)
+    }
+
+    /** 当前设置对应的回收站绝对路径（主存储卷），设置页与回收站页直接展示给用户。 */
+    suspend fun configuredTrashDir(): String = withContext(Dispatchers.IO) {
+        resolveTrashDir(StoragePaths.primaryRoot()).absolutePath
+    }
+
+    /**
+     * 目前实际存在条目用到的所有回收站目录。
+     *
+     * 用户改过位置后，老条目仍留在老目录（否则就凭空消失了），所以这里把
+     * "当前设置目录 + 已有条目所在目录" 都列出来，UI 上说明"旧条目留在原目录、仍可恢复"。
+     */
+    suspend fun trashLocations(): List<String> = withContext(Dispatchers.IO) {
+        val result = LinkedHashSet<String>()
+        runCatching { result += configuredTrashDir() }
+        runCatching { trashDao.all() }.getOrDefault(emptyList()).forEach { row ->
+            File(row.trashPath).parentFile?.absolutePath?.let { result += it }
+        }
+        result.toList()
+    }
 
     /**
      * 把索引里的图片移入回收站。
@@ -88,7 +118,7 @@ class TrashRepository(
                 continue
             }
             val root = StoragePaths.volumeRootOf(entity.path)
-            val trashDir = StoragePaths.trashDir(root)
+            val trashDir = resolveTrashDir(root)
             if (!trashDir.exists() && !trashDir.mkdirs()) {
                 failed++
                 failures += OpFailure(entity.displayName, "无法创建回收站目录")
@@ -189,7 +219,7 @@ class TrashRepository(
                 continue
             }
             val root = StoragePaths.volumeRootOf(ref.path)
-            val trashDir = StoragePaths.trashDir(root)
+            val trashDir = resolveTrashDir(root)
             if (!trashDir.exists() && !trashDir.mkdirs()) {
                 failed++
                 failures += OpFailure(ref.displayName, "无法创建回收站目录")

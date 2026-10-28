@@ -58,7 +58,7 @@ class AppContainer(context: Context) {
 
     // ---- M3 写操作（真实移动 / 回收站；需要 MANAGE_EXTERNAL_STORAGE） ----
 
-    val trashRepository: TrashRepository = TrashRepository(appContext, database)
+    val trashRepository: TrashRepository = TrashRepository(appContext, database, settingsRepository)
     val moveRepository: MoveRepository = MoveRepository(appContext, database)
 
     // ---- M4 批量写操作：进度/暂停/取消 + 复制 + 重命名 + 文件夹 + 操作历史/撤销 ----
