@@ -58,7 +58,8 @@ class FolderTreeTest {
     }
 
     @Test
-    fun siblingsSortedByTotalBytesDescThenName() {
+    fun siblingsSortedByNameAscending() {
+        // 大小不参与排序：big 有 900 字节，照样排在 beta 后面。
         val nodes = FolderTreeBuilder.build(
             listOf(
                 row("A/small/", 1, 10),
@@ -68,7 +69,23 @@ class FolderTreeTest {
         )
 
         val names = nodes.first().children.map { it.name }
-        assertEquals(listOf("big", "beta", "small"), names)
+        assertEquals(listOf("beta", "big", "small"), names)
+    }
+
+    @Test
+    fun siblingOrderIgnoresCase() {
+        val nodes = FolderTreeBuilder.build(
+            listOf(
+                row("A/Zebra/", 1, 10),
+                row("A/album/", 1, 10),
+                row("A/Beta/", 1, 10),
+            ),
+        )
+
+        assertEquals(
+            listOf("album", "Beta", "Zebra"),
+            nodes.first().children.map { it.name },
+        )
     }
 
     @Test

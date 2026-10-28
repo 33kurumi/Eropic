@@ -1,5 +1,6 @@
 package io.github.kurumi33.eropic.ui.cleanup
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,37 +18,38 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.cleanup.GroupQualityAssessment
-import io.github.kurumi33.eropic.core.cleanup.KeepCandidate
-import io.github.kurumi33.eropic.core.cleanup.KeepStrategy
-import io.github.kurumi33.eropic.core.cleanup.KeepSuggestion
 import io.github.kurumi33.eropic.core.cleanup.QualityScore
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.media.MediaUris
+import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import java.io.File
 import java.util.Locale
@@ -68,7 +70,8 @@ private sealed interface ThumbState {
  * 重复/相似分组的「双图并排 + 参数对照 + 判断依据」卡片。
  *
  * 纯展示：卡片自己不算任何分数，评分与依据全部来自 [assessment]，保证和清理页口径一致。
- * 真正删除由 [onApplyKeep] 的调用方执行（只会移入回收站，30 天内可恢复）。
+ * 勾选状态由调用方（CleanupScreen）统一持有，卡片只负责渲染「这张是否加入待删」并回调切换；
+ * 真正删除由 [onApply] 的调用方执行（只会移入回收站，30 天内可恢复）。
  */
 @Composable
 fun QualityGroupCard(
@@ -76,9 +79,12 @@ fun QualityGroupCard(
     members: List<MediaEntity>,
     assessment: GroupQualityAssessment,
     loadThumbnail: suspend (MediaEntity) -> File?,
+    selectedTrashIds: Set<Long>,
+    onToggleTrash: (Long) -> Unit,
+    onSelectSuggested: () -> Unit,
+    onApply: () -> Unit,
     onOpenViewer: (MediaEntity) -> Unit,
     onCompare: () -> Unit,
-    onApplyKeep: (KeepSuggestion) -> Unit,
     hasWriteAccess: Boolean,
 ) {
     // 评分与成员按 id 对齐，再按总分降序：A/B 两栏取前两名，第三张起排成小方块。
@@ -90,20 +96,38 @@ fun QualityGroupCard(
             .sortedByDescending { it.score.total }
     }
     val kindLabel = if (group.kind.equals("EXACT", ignoreCase = true)) "精确重复" else "相似图片"
-    var showStrategyDialog by remember { mutableStateOf(false) }
+    // 勾选集合是全局的（跨分组），这里只统计落在本组成员上的部分。
+    val memberIds = remember(members) { members.map { it.id }.toSet() }
+    val selectedInGroup = remember(selectedTrashIds, memberIds) {
+        selectedTrashIds.count { it in memberIds }
+    }
+    val suggestedCount = assessment.trashIds.size
+    val context = LocalContext.current
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // 卡头：类型 · 张数 · 可释放空间
-            Text(
-                text = "$kindLabel · ${group.memberCount} 张 · 可释放 ${formatBytes(group.reclaimableBytes)}",
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            // 卡头：类型 · 张数 · 可释放空间；右侧是用户当前勾选数，方便和底部按钮对账。
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "$kindLabel · ${group.memberCount} 张 · 可释放 ${formatBytes(group.reclaimableBytes)}",
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "已选 $selectedInGroup 张",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selectedInGroup > 0) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
 
             if (ranked.isEmpty()) {
                 // 成员还没加载好、或该组已被重新扫描掉：这里不能假设 scores 非空。
@@ -120,7 +144,9 @@ fun QualityGroupCard(
                             score = item.score,
                             label = if (index == 0) "A" else "B",
                             isKeep = item.media.id == assessment.keepMediaId,
-                            isTrash = item.media.id in assessment.trashIds,
+                            isSuggestedTrash = item.media.id in assessment.trashIds,
+                            selected = item.media.id in selectedTrashIds,
+                            onToggleTrash = { onToggleTrash(item.media.id) },
                             loadThumbnail = loadThumbnail,
                             onOpenViewer = { onOpenViewer(item.media) },
                             modifier = Modifier.weight(1f),
@@ -143,6 +169,9 @@ fun QualityGroupCard(
                                 media = item.media,
                                 score = item.score,
                                 isKeep = item.media.id == assessment.keepMediaId,
+                                isSuggestedTrash = item.media.id in assessment.trashIds,
+                                selected = item.media.id in selectedTrashIds,
+                                onToggleTrash = { onToggleTrash(item.media.id) },
                                 loadThumbnail = loadThumbnail,
                                 onOpenViewer = { onOpenViewer(item.media) },
                             )
@@ -185,81 +214,58 @@ fun QualityGroupCard(
                 // 置信度 = 前两名分差 / 30，差距小时提示用户别盲从建议。
                 if (assessment.confidence < 0.15) {
                     Text(
-                        text = "两张差距较小，建议先「对比预览」确认，或改用手动选择保留。",
+                        text = "两张差距较小，建议先「对比预览」确认后再决定。",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
 
-            // 底部操作：对比预览 / 手动选择保留；授权后才允许应用建议。
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onCompare) { Text("对比预览") }
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = "点缩略图右上角勾选框可切换是否移入回收站",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    textAlign = TextAlign.End,
+                )
+            }
+
+            // 底部两个并排按钮：先把建议全部勾上，再一键应用当前勾选。
             Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onCompare) { Text("对比预览") }
-                TextButton(
-                    onClick = { showStrategyDialog = true },
-                    enabled = members.isNotEmpty(),
-                ) { Text("手动选择保留") }
-            }
-            Button(
-                onClick = {
-                    onApplyKeep(
-                        KeepSuggestion(
-                            keepIds = if (assessment.keepMediaId >= 0L) {
-                                listOf(assessment.keepMediaId)
-                            } else {
-                                emptyList()
-                            },
-                            trashIds = assessment.trashIds,
-                            reclaimableBytes = group.reclaimableBytes,
-                            rationale = assessment.rationale,
-                        ),
-                    )
-                },
-                enabled = hasWriteAccess && assessment.trashIds.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("按建议移入回收站（${assessment.trashIds.size} 张）")
+                OutlinedButton(
+                    onClick = onSelectSuggested,
+                    enabled = hasWriteAccess && suggestedCount > 0,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("全选建议（$suggestedCount 张）", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Button(
+                    onClick = onApply,
+                    enabled = hasWriteAccess && selectedInGroup > 0,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("移入回收站（$selectedInGroup 张）", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
             if (!hasWriteAccess) {
                 // 点这一行直接跳系统的「所有文件访问」授权页（用户反馈过：别处的授权提示要能点）。
-                val context = androidx.compose.ui.platform.LocalContext.current
                 Text(
                     text = "需要「所有文件访问」权限，点这里去授权",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.clickable {
-                        runCatching {
-                            context.startActivity(
-                                io.github.kurumi33.eropic.core.permissions.StorageAccess.requestIntent(context),
-                            )
-                        }
+                        runCatching { context.startActivity(StorageAccess.requestIntent(context)) }
                     },
                 )
             }
         }
-    }
-
-    // 手动回退：让用户按体积/时间等规则自己挑保留哪一张，结果仍复用 onApplyKeep。
-    if (showStrategyDialog) {
-        KeepStrategyDialog(
-            candidates = members.map {
-                KeepCandidate(
-                    id = it.id,
-                    sizeBytes = it.sizeBytes,
-                    dateTakenMs = it.dateTakenMs,
-                    path = it.path,
-                )
-            },
-            defaultStrategy = KeepStrategy.LARGEST,
-            onDismiss = { showStrategyDialog = false },
-            onApply = { suggestion ->
-                showStrategyDialog = false
-                onApplyKeep(suggestion)
-            },
-        )
     }
 }
 
@@ -276,25 +282,70 @@ private fun qualitySummaryText(ranked: List<RankedMember>, confidence: Double): 
 /** 评分统一保留 1 位小数。 */
 private fun formatScore(score: Double): String = String.format(Locale.US, "%.1f", score)
 
-/** A/B 两栏中的一栏：1:1 缩略图 + 文件名 + 参数行。 */
+/**
+ * 叠在缩略图右上角的勾选框：勾上 = 加入待删（error 底 + 对勾），空框 = 不删。
+ *
+ * 没用 Material3 的 Checkbox，是因为它在 64dp 的小方块上最小触控区会把布局撑大；
+ * 这里自绘一个方形勾选框，外观与语义都和 Checkbox 一致。
+ */
+@Composable
+private fun SelectionBadge(
+    selected: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = if (selected) {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+        },
+        contentColor = if (selected) {
+            MaterialTheme.colorScheme.onError
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        shape = RoundedCornerShape(4.dp),
+        border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = modifier
+            .padding(6.dp)
+            .size(24.dp)
+            .clickable(onClick = onToggle),
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            if (selected) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = "移出待删",
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+}
+
+/** A/B 两栏中的一栏：1:1 缩略图 + 建议徽标 + 勾选框 + 文件名 + 参数行。 */
 @Composable
 private fun MemberPane(
     media: MediaEntity,
     score: QualityScore,
     label: String,
     isKeep: Boolean,
-    isTrash: Boolean,
+    isSuggestedTrash: Boolean,
+    selected: Boolean,
+    onToggleTrash: () -> Unit,
     loadThumbnail: suspend (MediaEntity) -> File?,
     onOpenViewer: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val shape = RoundedCornerShape(8.dp)
+    // 边框优先表达「当前用户选择」：勾上待删就是 error 色；没勾但建议保留则是 primary 色。
     val borderColor = when {
+        selected -> MaterialTheme.colorScheme.error
         isKeep -> MaterialTheme.colorScheme.primary
-        isTrash -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.outlineVariant
     }
-    val borderWidth = if (isKeep) 2.dp else 1.dp
+    val borderWidth = if (selected || isKeep) 2.dp else 1.dp
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(
@@ -310,6 +361,14 @@ private fun MemberPane(
                 loadThumbnail = loadThumbnail,
                 modifier = Modifier.fillMaxSize(),
             )
+            // 勾上待删时压一层半透明 error 蒙层，远看就能分清「会删 / 不会删」。
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.16f)),
+                )
+            }
             // 左上角 A/B 标记，方便和判断依据里的「A / B」对上。
             Surface(
                 color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
@@ -322,8 +381,13 @@ private fun MemberPane(
                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
                 )
             }
+            SelectionBadge(
+                selected = selected,
+                onToggle = onToggleTrash,
+                modifier = Modifier.align(Alignment.TopEnd),
+            )
             // 底部结论角标：建议保留 / 建议移入回收站。
-            if (isKeep || isTrash) {
+            if (isKeep || isSuggestedTrash) {
                 val container = if (isKeep) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {
@@ -369,24 +433,30 @@ private fun MemberPane(
             score.factors.forEach { factor ->
                 FactorRow(label = factor.label, value = factor.value)
             }
-            // 体积不在评分因子里（不参与打分），但对「哪张更值得留」有参考价值，单独补一行。
             FactorRow(label = "大小", value = formatBytes(media.sizeBytes))
         }
     }
 }
 
-/** 第三张起的小方块成员。 */
+/** 第三张起的小方块成员：缩略图 + 勾选框 + 一行状态。 */
 @Composable
 private fun ExtraMember(
     media: MediaEntity,
     score: QualityScore,
     isKeep: Boolean,
+    isSuggestedTrash: Boolean,
+    selected: Boolean,
+    onToggleTrash: () -> Unit,
     loadThumbnail: suspend (MediaEntity) -> File?,
     onOpenViewer: () -> Unit,
 ) {
     val shape = RoundedCornerShape(6.dp)
-    val borderColor = if (isKeep) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
-    val borderWidth = if (isKeep) 2.dp else 1.dp
+    val borderColor = when {
+        selected -> MaterialTheme.colorScheme.error
+        isKeep -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.outlineVariant
+    }
+    val borderWidth = if (selected || isKeep) 2.dp else 1.dp
 
     Column(
         modifier = Modifier.width(64.dp),
@@ -405,11 +475,39 @@ private fun ExtraMember(
                 loadThumbnail = loadThumbnail,
                 modifier = Modifier.fillMaxSize(),
             )
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.16f)),
+                )
+            }
+            SelectionBadge(
+                selected = selected,
+                onToggle = onToggleTrash,
+                modifier = Modifier.align(Alignment.TopEnd),
+            )
         }
         Text(
             text = formatScore(score.total),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+        // 小方块放不下徽标，用一行文字表达「建议保留 / 待删」。
+        Text(
+            text = when {
+                selected -> "待删"
+                isKeep -> "保留"
+                isSuggestedTrash -> "建议删"
+                else -> "—"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = when {
+                selected -> MaterialTheme.colorScheme.error
+                isKeep -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
             maxLines = 1,
         )
     }
@@ -465,12 +563,14 @@ private fun QualityThumbnail(
                 strokeWidth = 2.dp,
                 color = MaterialTheme.colorScheme.primary,
             )
+
             is ThumbState.Ready -> AsyncImage(
                 model = current.file,
                 contentDescription = media.displayName,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
+
             is ThumbState.Fallback -> AsyncImage(
                 model = MediaUris.of(media.id),
                 contentDescription = media.displayName,

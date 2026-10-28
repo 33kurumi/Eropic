@@ -15,10 +15,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,6 +47,7 @@ import io.github.kurumi33.eropic.core.folders.FolderTreeBuilder
 import io.github.kurumi33.eropic.core.folders.findFolderNode
 import io.github.kurumi33.eropic.core.folders.parentFolderPath
 import io.github.kurumi33.eropic.core.folders.splitFolderPath
+import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.core.model.FolderRow
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
@@ -87,6 +92,13 @@ fun FoldersSection(
     val tree = remember(rows) { FolderTreeBuilder.build(rows) }
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
+    // 排序：默认跟随图库的当前排序（sortOverride = null），用户在本页选过之后就固定下来。
+    // 枚举不是 Saveable，按枚举名存盘；列表页与网格页共用这一份，切来切去也不会丢。
+    var sortName by rememberSaveable { mutableStateOf<String?>(null) }
+    val sortOverride = remember(sortName) { sortOrderFromName(sortName) }
+    val gallerySort by viewModel.sortOrder.collectAsStateWithLifecycle()
+    val activeSort = sortOverride ?: gallerySort
+
     // 列表模式：目录可能随索引刷新而消失，查不到就退回根列表。
     val selectedNode = remember(tree, selectedPath) {
         selectedPath?.let { path -> findFolderNode(tree, path) }
@@ -113,6 +125,7 @@ fun FoldersSection(
             onBack = { selectedPath = null },
             onOpenViewer = onOpenViewer,
             hasWriteAccess = hasWriteAccess,
+            initialSort = sortOverride,
         )
 
         !gridLayout -> FolderTreeContent(
@@ -127,6 +140,8 @@ fun FoldersSection(
                 gridLayout = true
                 gridShowImages = false
             },
+            activeSort = activeSort,
+            onSortSelected = { order -> sortName = order.name },
         )
 
         // 网格里点「查看本层全部图片」：复用详情页的大网格（含多选、移动、回收站）。
@@ -138,6 +153,7 @@ fun FoldersSection(
             onOpenViewer = onOpenViewer,
             hasWriteAccess = hasWriteAccess,
             initialIncludeSubfolders = gridIncludeSubfolders,
+            initialSort = sortOverride,
         )
 
         else -> FolderGridScreen(
@@ -146,6 +162,8 @@ fun FoldersSection(
             path = gridPath,
             includeSubfolders = gridIncludeSubfolders,
             refreshToken = indexState.finishedAtMs,
+            sortOverride = sortOverride,
+            onSortSelected = { order -> sortName = order.name },
             onToggleIncludeSubfolders = { checked -> gridIncludeSubfolders = checked },
             onOpenFolder = { path -> gridPath = path },
             onUp = { parentFolderPath(gridPath)?.let { parent -> gridPath = parent } },
@@ -169,6 +187,8 @@ private fun FolderTreeContent(
     onToggleExpand: (String) -> Unit,
     onOpenFolder: (String) -> Unit,
     onSwitchToGrid: () -> Unit,
+    activeSort: SortOrder,
+    onSortSelected: (SortOrder) -> Unit,
 ) {
     // 按展开状态把树摊平成"可见节点"列表：LazyColumn 只组合可见行，展开一万个节点也不卡。
     // 这里读到 expanded 的快照值，展开/收起会自动触发重组。
@@ -198,6 +218,7 @@ private fun FolderTreeContent(
                 }
             },
             actions = {
+                FolderSortMenu(activeSort = activeSort, onSelect = onSortSelected)
                 IconButton(onClick = onSwitchToGrid) {
                     Icon(imageVector = Icons.Filled.GridView, contentDescription = "切换为网格视图")
                 }
@@ -330,3 +351,43 @@ private fun folderNameOf(tree: List<FolderNode>, path: String): String {
     findFolderNode(tree, path)?.let { return it.name }
     return splitFolderPath(path).lastOrNull() ?: path
 }
+
+/**
+ * 排序菜单：与「图库」页一致的 [Icons.AutoMirrored.Filled.Sort] 图标 + 下拉项，
+ * 选项就是 [SortOrder.entries]，文案直接取 [SortOrder.label]。
+ *
+ * 文件夹的三个页面（目录树 / 网格 / 详情）共用这一个组件，避免各写一份之后三处行为不一致。
+ * [activeSort] 只用来打勾：用户还没在本页选过时，它就是图库当前的排序。
+ */
+@Composable
+internal fun FolderSortMenu(
+    activeSort: SortOrder,
+    onSelect: (SortOrder) -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { menuOpen = true }) {
+            Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = "排序")
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            SortOrder.entries.forEach { order ->
+                DropdownMenuItem(
+                    text = { Text(order.label) },
+                    trailingIcon = {
+                        if (order == activeSort) {
+                            Icon(imageVector = Icons.Filled.Check, contentDescription = null)
+                        }
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onSelect(order)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** 枚举名 ↔ [SortOrder]：rememberSaveable 只能存基本类型，所以排序按枚举名存盘。 */
+internal fun sortOrderFromName(name: String?): SortOrder? =
+    name?.let { value -> SortOrder.entries.firstOrNull { it.name == value } }

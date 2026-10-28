@@ -12,8 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,18 +37,22 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.SearchOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -93,6 +95,20 @@ private const val KEYWORD_DEBOUNCE_MS = 400L
 /** 本地相似判定的 dHash 距离上限，与 SimilarityQuery 的默认值保持一致；顶部统计条直接展示给用户。 */
 private const val DHASH_MAX_DISTANCE = 16
 
+/** 顶部两个 Tab：两块功能各自独立，共用同一张源图。 */
+private val FIND_TABS: List<String> = listOf("本地识图", "联网识图")
+
+/**
+ * 联网识图只保留这 4 家：Google Lens / Yandex / SauceNAO / ascii2d。
+ * 这里显式列出来而不是用 ReverseImageProvider.entries，方便以后枚举里再增删而不影响界面顺序。
+ */
+private val ONLINE_PROVIDERS: List<ReverseImageProvider> = listOf(
+    ReverseImageProvider.GOOGLE_LENS,
+    ReverseImageProvider.YANDEX,
+    ReverseImageProvider.SAUCENAO,
+    ReverseImageProvider.ASCII2D,
+)
+
 /**
  * 本地识图的源图：要么是「从设备选图」拿到的 content Uri，要么是「从图库选」里的一张已索引图片。
  *
@@ -125,21 +141,24 @@ private object ImageFindSession {
 }
 
 /**
- * 以图搜图页（M4 识图）。
+ * 识图页（v0.3 拆分版）。
  *
- * 两条独立能力：
+ * 顶部用两个 Tab 把两种能力彻底分开，两块内容各自独立滚动，不混排：
  * 1. 本地识图：选一张源图 → ViewModel 计算/读取指纹并与库里的图片比对，结果通过
  *    [EropicViewModel.similarityHits] 推给页面；关键词输入防抖 400ms 后交给 ViewModel 重跑。
- * 2. 联网识图：把当前源图上传到所选服务商，成功后用浏览器打开结果页；失败用 Snackbar 提示。
+ * 2. 联网识图：把当前源图上传到所选服务商，成功后用浏览器打开结果页，失败就地提示。
  *
- * 本地比对完全在本机完成，不会上传任何图片；只有点联网服务商的 chip 才会触发上传。
+ * 两块共用同一张源图（[ImageFindSession] 保存源图与关键词，因为打开查看器会把整页移出组合）。
+ * 本地比对完全在本机完成，不会上传任何图片；只有「联网识图」里点服务商才会触发上传。
+ *
+ * [onBack] 为 null 表示这是底部导航的一级页面（不显示返回箭头），非 null 时显示返回。
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImageFindScreen(
     viewModel: EropicViewModel,
-    onBack: () -> Unit,
-    onOpenViewer: (List<Long>, Int) -> Unit,
+    onBack: (() -> Unit)? = null,
+    onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val hits by viewModel.similarityHits.collectAsStateWithLifecycle()
@@ -148,13 +167,18 @@ fun ImageFindScreen(
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
 
-    // 当前选中的源图；null 表示还在引导页。
+    // 当前选中的源图；null 表示还在引导页。状态放在文件级会话对象里：
+    // 打开查看器时 EropicRoot 会把整页移出组合，普通 remember 会丢，回到页面时源图就没了。
     var source by remember { mutableStateOf(ImageFindSession.source) }
     // keywordInput 是输入框原文，appliedKeyword 是已经交给 ViewModel 的关键词，两者比较做防抖。
     var keywordInput by remember { mutableStateOf(ImageFindSession.keywordInput) }
     var appliedKeyword by remember { mutableStateOf(ImageFindSession.appliedKeyword) }
     var onlineLoading by remember { mutableStateOf<ReverseImageProvider?>(null) }
+    var onlineNotice by remember { mutableStateOf<OnlineNotice?>(null) }
     var showCandidates by remember { mutableStateOf(false) }
+    var showSauceNaoDialog by remember { mutableStateOf(false) }
+    // 0 = 本地识图，1 = 联网识图。
+    var selectedTab by remember { mutableStateOf(0) }
 
     // 同步到会话对象，保证从查看器返回（本页被销毁重组）后还能接着看结果。
     LaunchedEffect(source) { ImageFindSession.source = source }
@@ -188,6 +212,7 @@ fun ImageFindScreen(
     fun resetSource() {
         source = null
         showCandidates = false
+        onlineNotice = null
     }
 
     // 把关键词立刻交给 ViewModel（内部会按上次源图自动重跑检索）。
@@ -206,9 +231,10 @@ fun ImageFindScreen(
         }
     }
 
-    // 选好源图后触发一次本地检索；失败不崩溃，只提示。
+    // 选好源图后触发一次本地检索；失败不崩溃，只提示。联网识图也复用这张源图。
     fun startLocalSearch(next: FindSource) {
         source = next
+        onlineNotice = null
         val trimmed = keywordInput.trim()
         val keywordChanged = trimmed != appliedKeyword
         appliedKeyword = trimmed
@@ -227,7 +253,13 @@ fun ImageFindScreen(
             viewModel.postMessage("请先选择一张源图")
             return
         }
+        // SauceNAO 需要 API Key：没配置时直接引导去设置/官网，而不是等上传失败再报「暂未支持」。
+        if (provider == ReverseImageProvider.SAUCENAO && !viewModel.sauceNaoApiKeyConfigured()) {
+            showSauceNaoDialog = true
+            return
+        }
         onlineLoading = provider
+        onlineNotice = null
         scope.launch {
             val result: OnlineSearchResult? = try {
                 viewModel.onlineImageSearch(provider)
@@ -238,17 +270,26 @@ fun ImageFindScreen(
             }
             onlineLoading = null
             if (result == null) {
-                viewModel.postMessage("联网识图失败：请检查网络后重试")
+                onlineNotice = OnlineNotice(false, "联网识图失败：请检查网络后重试")
                 return@launch
             }
             val resultUrl = result.resultUrl
             if (result.ok && !resultUrl.isNullOrBlank()) {
-                if (!openInBrowser(context, resultUrl)) {
-                    viewModel.postMessage("没有可以打开该链接的浏览器")
+                if (openInBrowser(context, resultUrl)) {
+                    onlineNotice = OnlineNotice(true, "已在浏览器打开 " + provider.label + " 的结果页")
+                } else {
+                    onlineNotice = OnlineNotice(false, "没有可以打开该链接的浏览器")
                 }
             } else {
-                viewModel.postMessage(result.message ?: "该服务暂时不可用")
+                onlineNotice = OnlineNotice(false, result.message ?: "该服务暂时不可用")
             }
+        }
+    }
+
+    // 上传失败或没配置 Key 时的兜底：直接在浏览器打开服务商官网手动传图。
+    fun openProviderHome(provider: ReverseImageProvider) {
+        if (!openInBrowser(context, provider.homeUrl)) {
+            viewModel.postMessage("没有可以打开该链接的浏览器")
         }
     }
 
@@ -269,20 +310,23 @@ fun ImageFindScreen(
         applyKeywordNow(trimmed)
     }
 
-    BackHandler(onBack = onBack)
+    // onBack 为 null 表示这是底部 Tab 的一级页面，交给系统默认返回即可。
+    BackHandler(enabled = onBack != null) { onBack?.invoke() }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                if (onBack != null) {
+                    IconButton(onClick = onBack) {
+                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
                 }
             },
             title = {
                 Column {
-                    Text(text = "以图搜图", style = MaterialTheme.typography.titleMedium)
+                    Text(text = "识图", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "本地相似图 + 联网识图",
+                        text = "本地相似图 · 联网以图搜图",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -297,7 +341,19 @@ fun ImageFindScreen(
             },
         )
 
+        // 两块功能分开：顶部 Tab 切换，下面各自独立滚动，不混在同一个列表里。
+        TabRow(selectedTabIndex = selectedTab) {
+            FIND_TABS.forEachIndexed { index, label ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index },
+                    text = { Text(label) },
+                )
+            }
+        }
+
         if (source == null) {
+            // 还没选源图：两个 Tab 共用同一段引导，选好后自动切到当前 Tab 的内容。
             SourceGuidance(
                 candidates = candidates,
                 showCandidates = showCandidates,
@@ -317,67 +373,108 @@ fun ImageFindScreen(
         } else {
             val current = source
             if (current != null) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    SourceSummary(
-                        source = current,
+                SourceSummary(
+                    source = current,
+                    onReselect = { resetSource() },
+                )
+                when (selectedTab) {
+                    0 -> LocalFindTab(
+                        modifier = Modifier.weight(1f),
+                        hits = hits,
+                        searching = searching,
+                        columns = settings.gridColumns,
+                        thumbnailsEnabled = settings.thumbnailCacheEnabled,
+                        thumbnailProvider = hitThumbnail,
+                        keywordInput = keywordInput,
+                        onKeywordChange = { keywordInput = it },
+                        onKeywordSubmit = {
+                            focusManager.clearFocus()
+                            applyKeywordNow(keywordInput)
+                        },
+                        onOpenViewer = onOpenViewer,
                         onReselect = { resetSource() },
                     )
-
-                    OutlinedTextField(
-                        value = keywordInput,
-                        onValueChange = { keywordInput = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp),
-                        placeholder = { Text("按文件名/目录过滤（可选）") },
-                        singleLine = true,
-                        trailingIcon = {
-                            if (keywordInput.isNotEmpty()) {
-                                IconButton(onClick = { keywordInput = "" }) {
-                                    Icon(imageVector = Icons.Filled.Close, contentDescription = "清除关键词")
-                                }
-                            }
-                        },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(
-                            onSearch = {
-                                focusManager.clearFocus()
-                                applyKeywordNow(keywordInput)
-                            },
-                        ),
-                    )
-
-                    OnlineSearchSection(
+                    else -> OnlineFindTab(
+                        modifier = Modifier.weight(1f),
                         onlineLoading = onlineLoading,
-                        searching = searching,
+                        notice = onlineNotice,
+                        sauceNaoConfigured = viewModel.sauceNaoApiKeyConfigured(),
                         onSearch = { provider -> launchOnlineSearch(provider) },
+                        onOpenHome = { provider -> openProviderHome(provider) },
                     )
+                }
+            }
+        }
+    }
 
-                    Box(modifier = Modifier.weight(1f)) {
-                        val loading = searching
-                        when {
-                            hits.isEmpty() && loading -> FindingState()
-                            hits.isEmpty() -> EmptyResultState(onReselect = { resetSource() })
-                            else -> Column(modifier = Modifier.fillMaxSize()) {
-                                Text(
-                                    text = "共 " + hits.size + " 张 · 阈值 dHash≤" + DHASH_MAX_DISTANCE,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp),
-                                )
-                                if (loading) {
-                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                                }
-                                SimilarHitsGrid(
-                                    hits = hits,
-                                    columns = settings.gridColumns,
-                                    thumbnailsEnabled = settings.thumbnailCacheEnabled,
-                                    thumbnailProvider = hitThumbnail,
-                                    onOpen = onOpenViewer,
-                                )
-                            }
-                        }
+    // SauceNAO 没有配置 Key 时的说明框：给出注册官网入口，而不是让人去猜。
+    if (showSauceNaoDialog) {
+        SauceNaoKeyDialog(
+            onDismiss = { showSauceNaoDialog = false },
+            onOpenHome = {
+                showSauceNaoDialog = false
+                openInBrowser(context, ReverseImageProvider.SAUCENAO.homeUrl)
+            },
+        )
+    }
+}
+
+/** 「本地识图」Tab：关键词过滤 + 相似结果网格，内容独立滚动。 */
+@Composable
+private fun LocalFindTab(
+    modifier: Modifier = Modifier,
+    hits: List<SimilarImageHit>,
+    searching: Boolean,
+    columns: Int,
+    thumbnailsEnabled: Boolean,
+    thumbnailProvider: suspend (Long) -> File?,
+    keywordInput: String,
+    onKeywordChange: (String) -> Unit,
+    onKeywordSubmit: () -> Unit,
+    onOpenViewer: (List<Long>, Int) -> Unit,
+    onReselect: () -> Unit,
+) {
+    Column(modifier = modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = keywordInput,
+            onValueChange = onKeywordChange,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            placeholder = { Text("按文件名/目录过滤（可选）") },
+            singleLine = true,
+            trailingIcon = {
+                if (keywordInput.isNotEmpty()) {
+                    IconButton(onClick = { onKeywordChange("") }) {
+                        Icon(imageVector = Icons.Filled.Close, contentDescription = "清除关键词")
                     }
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onKeywordSubmit() }),
+        )
+
+        Box(modifier = Modifier.weight(1f)) {
+            when {
+                hits.isEmpty() && searching -> FindingState()
+                hits.isEmpty() -> EmptyResultState(onReselect = onReselect)
+                else -> Column(modifier = Modifier.fillMaxSize()) {
+                    Text(
+                        text = "共 " + hits.size + " 张 · 阈值 dHash≤" + DHASH_MAX_DISTANCE,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp),
+                    )
+                    if (searching) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    SimilarHitsGrid(
+                        hits = hits,
+                        columns = columns,
+                        thumbnailsEnabled = thumbnailsEnabled,
+                        thumbnailProvider = thumbnailProvider,
+                        onOpen = onOpenViewer,
+                    )
                 }
             }
         }
@@ -410,21 +507,28 @@ private fun SourceGuidance(
             modifier = Modifier.size(72.dp),
         )
         Text(
-            text = "以图搜图",
+            text = "选择源图",
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.padding(top = 16.dp),
         )
         Text(
-            text = "选一张图片，找出图库里与它相似的本地照片；也可以把这张图上传到联网识图服务搜同款。",
+            text = "选一张图片作为源图：「本地识图」找出图库里与它相似的照片，「联网识图」把这张图上传到服务商搜同款。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 8.dp),
         )
         Text(
-            text = "本地比对完全在手机上完成，不会上传图片；只有点下方联网服务商才会把这张图发给对方。",
+            text = "本地比对完全在手机上完成，不会上传图片；只有「联网识图」里点服务商才会把这张图发给对方。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        Text(
+            text = "两个 Tab 共用这张源图，选好后可随时在顶部切换。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 6.dp),
         )
@@ -547,18 +651,24 @@ private fun SourceSummary(
     }
 }
 
-/** 联网识图服务商：一排 chip，同一时间只允许一个请求。 */
-@OptIn(ExperimentalLayoutApi::class)
+/** 联网识图最近一次的结果提示：成功用主色，失败用错误色。 */
+private data class OnlineNotice(val ok: Boolean, val text: String)
+
+/** 「联网识图」Tab：4 个服务商按钮 + 最近一次结果提示；整块独立滚动。 */
 @Composable
-private fun OnlineSearchSection(
+private fun OnlineFindTab(
+    modifier: Modifier = Modifier,
     onlineLoading: ReverseImageProvider?,
-    searching: Boolean,
+    notice: OnlineNotice?,
+    sauceNaoConfigured: Boolean,
     onSearch: (ReverseImageProvider) -> Unit,
+    onOpenHome: (ReverseImageProvider) -> Unit,
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
@@ -568,46 +678,140 @@ private fun OnlineSearchSection(
                 modifier = Modifier.size(16.dp),
             )
             Text(
-                text = "联网识图",
+                text = "选择服务商",
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.padding(start = 6.dp),
             )
         }
         Text(
-            text = "把这张图上传到服务商，在浏览器里看结果。",
+            text = "把当前源图上传到服务商，在浏览器里看结果。上传意味着这张图会离开本机。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp),
         )
-        FlowRow(
+
+        if (onlineLoading != null) {
+            Text(
+                text = "正在上传到 " + onlineLoading.label + "…",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp),
+            )
+        }
+
+        val currentNotice = notice
+        if (currentNotice != null) {
+            Text(
+                text = currentNotice.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (currentNotice.ok) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+                modifier = Modifier.padding(top = 10.dp),
+            )
+        }
+
+        ONLINE_PROVIDERS.forEach { provider ->
+            ProviderRow(
+                provider = provider,
+                enabled = onlineLoading == null,
+                loading = onlineLoading == provider,
+                needsKey = provider == ReverseImageProvider.SAUCENAO && !sauceNaoConfigured,
+                onSearch = { onSearch(provider) },
+                onOpenHome = { onOpenHome(provider) },
+            )
+        }
+
+        Text(
+            text = "识别不出结果时，可以点「官网」手动上传原图再试；SauceNAO 需要先在「设置 → 联网识图」填 API Key。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 14.dp),
+        )
+    }
+}
+
+/** 单个服务商：名称 + 状态说明 + 「官网」兜底入口 + 识图按钮。 */
+@Composable
+private fun ProviderRow(
+    provider: ReverseImageProvider,
+    enabled: Boolean,
+    loading: Boolean,
+    needsKey: Boolean,
+    onSearch: () -> Unit,
+    onOpenHome: () -> Unit,
+) {
+    OutlinedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp),
+    ) {
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+                .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            ReverseImageProvider.entries.forEach { provider ->
-                val isLoading = onlineLoading == provider
-                FilterChip(
-                    selected = isLoading,
-                    enabled = onlineLoading == null && !searching,
-                    onClick = { onSearch(provider) },
-                    label = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (isLoading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(14.dp),
-                                    strokeWidth = 2.dp,
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                            }
-                            Text(text = provider.label)
-                        }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = provider.label, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    text = when {
+                        needsKey -> "需要 API Key（免费注册）"
+                        loading -> "正在上传…"
+                        else -> "上传这张图，在浏览器看结果"
                     },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
+            }
+            TextButton(onClick = onOpenHome, enabled = !loading) {
+                Icon(
+                    imageVector = Icons.Outlined.OpenInNew,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("官网")
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+            Button(onClick = onSearch, enabled = enabled && !loading) {
+                if (loading) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                } else {
+                    Text(if (needsKey) "填 Key" else "识图")
+                }
             }
         }
     }
+}
+
+/** SauceNAO 未配置 API Key 时的说明框：告诉用户去哪里填，并给出官网入口。 */
+@Composable
+private fun SauceNaoKeyDialog(
+    onDismiss: () -> Unit,
+    onOpenHome: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("SauceNAO 需要 API Key") },
+        text = {
+            Text("SauceNAO 需要在「设置 → 联网识图」填 API Key（免费注册）。注册后在账号页复制 API Key，粘贴到设置里即可。")
+        },
+        confirmButton = {
+            TextButton(onClick = onOpenHome) { Text("打开官网") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("知道了") }
+        },
+    )
 }
 
 /** 结果网格：点击任意结果打开查看器，并带上整个结果集的 id，方便左右翻看。 */

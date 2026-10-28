@@ -236,16 +236,26 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     // 文件夹页不继承图库的「只看收藏」筛选：否则树里显示 500 张、点进去只有 3 张，
     // 而且那个筛选是图库里的临时状态，用户不会想到它会影响到这里。
-    fun folderMedia(path: String, includeSubfolders: Boolean): Flow<PagingData<MediaEntity>> =
+    // v0.3：文件夹页也有自己的排序（用户反馈"文件夹界面为什么没有图库的排序功能"）。
+    // sort = null 表示沿用图库当前的排序，页面自己选了排序就传具体值。
+    fun folderMedia(
+        path: String,
+        includeSubfolders: Boolean,
+        sort: SortOrder? = null,
+    ): Flow<PagingData<MediaEntity>> =
         repository.pagingData(
-            sort = sortOrder.value,
+            sort = sort ?: sortOrder.value,
             favoritesOnly = false,
             folderPath = path,
             includeSubfolders = includeSubfolders,
         )
 
-    suspend fun folderIds(path: String, includeSubfolders: Boolean): List<Long> = repository.ids(
-        sort = sortOrder.value,
+    suspend fun folderIds(
+        path: String,
+        includeSubfolders: Boolean,
+        sort: SortOrder? = null,
+    ): List<Long> = repository.ids(
+        sort = sort ?: sortOrder.value,
         favoritesOnly = false,
         folderPath = path,
         includeSubfolders = includeSubfolders,
@@ -298,6 +308,18 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     /** 小图候选：小于 200x200。 */
     suspend fun smallImages(): List<MediaEntity> = container.smallImageDetector.find()
+
+    /**
+     * v0.3：大图候选（按分辨率，>= 800 万像素，从大到小）。
+     *
+     * 清理页把原来的「小图」分类换成了「大图」：小图一般不影响空间，
+     * 而大图（长截图、全景、老旗舰直出）才是用户想找出来看的。
+     */
+    suspend fun largeImages(): List<MediaEntity> = container.largeImageDetector.find()
+
+    /** 大图的全库命中数与总字节（不按列表 LIMIT 截断，清理报告用）。 */
+    suspend fun largeImageSummary(): io.github.kurumi33.eropic.core.analysis.detectors.LargeFileSummaryRow =
+        container.largeImageDetector.summary()
 
     fun filteredMedia(filter: MediaFilter): Flow<PagingData<MediaEntity>> =
         repository.pagingData(filter, sortOrder.value)
@@ -559,7 +581,11 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     // ---- v0.2：识图（本地相似图检索 + 联网以图搜图） ----
 
     private val imageSearch = ImageSearchRepository(container.appContext, container.database)
-    private val onlineSearchClient = OnlineImageSearch(container.appContext.contentResolver)
+    // API Key 用 lambda 读：设置里改了 key 不用重建 ViewModel / 重新进页面。
+    private val onlineSearchClient = OnlineImageSearch(
+        contentResolver = container.appContext.contentResolver,
+        sauceNaoApiKey = { settings.value.sauceNaoApiKey },
+    )
 
     private val _similarityHits = MutableStateFlow<List<SimilarImageHit>>(emptyList())
 
@@ -614,6 +640,17 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     /** 识图页「从图库选图」用的候选：最近的一批图片。 */
     suspend fun searchSourceCandidates(limit: Int = 60): List<MediaEntity> =
         repository.byIds(repository.ids(SortOrder.DATE_DESC, false).take(limit))
+
+    /** v0.3：设置里是否已经填了 SauceNAO 的 API Key（识图页据此提示"去设置里填"）。 */
+    fun sauceNaoApiKeyConfigured(): Boolean = settings.value.sauceNaoApiKey.isNotBlank()
+
+    /** v0.3：保存 SauceNAO API Key（去空白后落 DataStore）。 */
+    fun setSauceNaoApiKey(key: String) {
+        viewModelScope.launch {
+            container.settingsRepository.setSauceNaoApiKey(key)
+            postMessage(if (key.isBlank()) "已清空 SauceNAO API Key" else "已保存 SauceNAO API Key")
+        }
+    }
 
     /** 联网识图：成功返回 resultUrl 交给 UI 打开浏览器，失败返回 message。 */
     suspend fun onlineImageSearch(provider: ReverseImageProvider): OnlineSearchResult {

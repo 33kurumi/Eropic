@@ -1,5 +1,6 @@
 package io.github.kurumi33.eropic.ui.cleanup
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,34 +30,38 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
-import io.github.kurumi33.eropic.core.cleanup.KeepSuggestion
+import io.github.kurumi33.eropic.core.cleanup.GroupQualityAssessment
 import io.github.kurumi33.eropic.core.cleanup.QualityScorer
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.fileops.FileOpReport
 import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.index.IndexState
 import io.github.kurumi33.eropic.core.media.MediaUris
+import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
@@ -74,7 +79,7 @@ enum class CleanupCategory(val label: String) {
     SCREENSHOT("截图"),
     BLURRY("模糊"),
     BURST("连拍"),
-    SMALL("小图"),
+    LARGE_IMAGE("大图"),
 }
 
 /** 当前分类要展示的内容。 */
@@ -91,12 +96,9 @@ fun CleanupScreen(
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
     hasWriteAccess: Boolean = false,
 ) {
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val scope = rememberCoroutineScope()
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
-    // 入口区展示回收站概览：v0.2 起回收站从底栏移出，这里是最显眼的入口。
-    val trashCount by viewModel.trashCount.collectAsStateWithLifecycle()
-    val trashTotalBytes by viewModel.trashTotalBytes.collectAsStateWithLifecycle()
 
     var category by rememberSaveable { mutableStateOf(CleanupCategory.DUPLICATES) }
     var filterState by remember { mutableStateOf(FilterUiState()) }
@@ -189,11 +191,12 @@ fun CleanupScreen(
                     )
                 }
 
-                CleanupCategory.SMALL -> {
-                    val items = viewModel.smallImages()
+                CleanupCategory.LARGE_IMAGE -> {
+                    val items = viewModel.largeImages()
                     CleanupContent.Detected(
                         items = items,
-                        summary = "小图：面积小于 200×200 的图片，共 ${formatCount(items.size.toLong())} 张",
+                        summary = "大图：按像素从大到小排列，共 ${formatCount(items.size.toLong())} 张。" +
+                            "像素大不等于占空间大，确认无用再清理。",
                     )
                 }
             }
@@ -202,6 +205,65 @@ fun CleanupScreen(
                 items = emptyList(),
                 summary = "读取失败：${error.message ?: error::class.simpleName}",
             )
+        }
+    }
+
+    // 分组类的成员与评分统一在这里加载：卡片只负责渲染，勾选/汇总/全局删除都基于同一份数据。
+    val groupedGroups = (content as? CleanupContent.Grouped)?.groups.orEmpty()
+    val memberMap by produceState<Map<Long, List<MediaEntity>>>(
+        initialValue = emptyMap(),
+        groupedGroups,
+        refreshToken,
+    ) {
+        value = groupedGroups.associate { group ->
+            // 单组读取失败不该让整个列表崩掉，只是这一组暂时没有成员。
+            group.groupId to runCatching { viewModel.members(group.groupId) }.getOrDefault(emptyList())
+        }
+    }
+    val assessmentMap = remember(memberMap) {
+        memberMap.mapValues { (_, members) -> QualityScorer.assess(members) }
+    }
+    // 默认勾选：评分器建议移入回收站的那些。用户手动点过的记录在 overrides 里覆盖默认值。
+    val suggestedIds = remember(assessmentMap) {
+        assessmentMap.values.flatMap { it.trashIds }.toSet()
+    }
+    val selectionOverrides = remember { mutableStateMapOf<Long, Boolean>() }
+    // 已加载的成员 id：刷新后消失的图片不应再算进「已选」，否则计数和实际删除会不一致。
+    val knownIds = remember(memberMap) {
+        memberMap.values.flatten().mapTo(mutableSetOf()) { it.id }
+    }
+    val selectedIds: Set<Long> = buildSet {
+        suggestedIds.forEach { id -> if (selectionOverrides[id] != false) add(id) }
+        selectionOverrides.forEach { (id, selected) -> if (selected && id in knownIds) add(id) }
+    }
+    val memberSizes = remember(memberMap) {
+        memberMap.values.flatten().associate { it.id to it.sizeBytes }
+    }
+    val selectedBytes = selectedIds.sumOf { memberSizes[it] ?: 0L }
+
+    // 勾选只改本地状态；真正删除统一走 applyTrash，保证「报告 + 跳转 + 清空勾选 + 刷新」一致。
+    fun toggleTrash(id: Long) {
+        selectionOverrides[id] = id !in selectedIds
+    }
+
+    fun applyTrash(ids: List<Long>) {
+        if (ids.isEmpty()) return
+        scope.launch {
+            val result = viewModel.moveToTrash(ids)
+            val report = FileOpReport(
+                type = "TRASH",
+                title = "移入回收站",
+                requested = ids.size,
+                succeeded = result.trashed,
+                failed = result.failed,
+                bytes = result.bytes,
+                failures = result.failures,
+            )
+            viewModel.publishReport(report)
+            viewModel.openScreen(AppScreen.Report(report))
+            // 索引行已被删除，清空勾选并重新加载成员，避免继续显示已删的图片。
+            selectionOverrides.clear()
+            refreshToken++
         }
     }
 
@@ -243,15 +305,6 @@ fun CleanupScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item { IndexCard(indexState, onStart = viewModel::startIndex, onCancel = viewModel::cancelIndex) }
-            item {
-                EntryArea(
-                    trashCount = trashCount,
-                    trashTotalBytes = trashTotalBytes,
-                    onOpenTrash = { viewModel.openScreen(AppScreen.Trash) },
-                    onOpenImageFind = { viewModel.openScreen(AppScreen.ImageFind) },
-                )
-            }
-            item { ReadOnlyNotice() }
 
             when (val current = content) {
                 CleanupContent.Loading -> item {
@@ -279,21 +332,32 @@ fun CleanupScreen(
                     if (current.groups.isEmpty()) {
                         item { EmptyHint() }
                     } else {
+                        // 全局汇总条：跨分组显示总勾选数，并提供一键全选建议 / 一键删除。
+                        item {
+                            SelectionSummaryBar(
+                                selectedCount = selectedIds.size,
+                                selectedBytes = selectedBytes,
+                                hasWriteAccess = hasWriteAccess,
+                                onSelectAllSuggested = { selectionOverrides.clear() },
+                                onApply = { applyTrash(selectedIds.toList()) },
+                            )
+                        }
                         items(current.groups, key = { it.groupId }) { group ->
-                            QualityGroupItem(
+                            GroupItem(
                                 group = group,
-                                loadMembers = viewModel::members,
+                                members = memberMap[group.groupId].orEmpty(),
+                                assessment = assessmentMap[group.groupId]
+                                    ?: QualityScorer.assess(emptyList()),
+                                selectedIds = selectedIds,
                                 loadThumbnail = viewModel::thumbnailFile,
                                 hasWriteAccess = hasWriteAccess,
+                                onToggleTrash = { toggleTrash(it) },
+                                onSelectSuggested = { trashIds ->
+                                    trashIds.forEach { selectionOverrides[it] = true }
+                                },
+                                onApply = { ids -> applyTrash(ids) },
                                 onOpenViewer = onOpenViewer,
                                 onCompare = { compareGroupId = group.groupId },
-                                onApplyKeep = { suggestion ->
-                                    scope.launch {
-                                        val result = viewModel.moveToTrash(suggestion.trashIds)
-                                        viewModel.postMessage(result.message, undoTrashIds = result.trashIds)
-                                        refreshToken++
-                                    }
-                                },
                             )
                         }
                     }
@@ -319,6 +383,74 @@ fun CleanupScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 全局汇总条：显示当前跨分组勾选了多少张、预计释放多少空间。
+ * 放在列表里而不是固定悬浮，是为了不遮挡最后一张卡片，也不用处理嵌套滑动手势。
+ */
+@Composable
+private fun SelectionSummaryBar(
+    selectedCount: Int,
+    selectedBytes: Long,
+    hasWriteAccess: Boolean,
+    onSelectAllSuggested: () -> Unit,
+    onApply: () -> Unit,
+) {
+    val context = LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "已选 $selectedCount 张",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (selectedCount > 0) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                    )
+                    Text(
+                        text = if (selectedCount > 0) {
+                            "预计释放 ${formatBytes(selectedBytes)}（移入回收站，30 天内可恢复）"
+                        } else {
+                            "点缩略图右上角勾选框勾选，或点下面「全部按建议勾选」。"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onSelectAllSuggested,
+                    modifier = Modifier.weight(1f),
+                ) { Text("全部按建议勾选", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                Button(
+                    onClick = onApply,
+                    enabled = hasWriteAccess && selectedCount > 0,
+                    modifier = Modifier.weight(1f),
+                ) { Text("移入回收站", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
+            if (!hasWriteAccess) {
+                Text(
+                    text = "需要「所有文件访问」权限才能执行删除，点这里去授权",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.clickable {
+                        runCatching { context.startActivity(StorageAccess.requestIntent(context)) }
+                    },
+                )
             }
         }
     }
@@ -364,6 +496,12 @@ private fun IndexCard(indexState: IndexState, onStart: () -> Unit, onCancel: () 
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // 只读声明压缩成一行小注：原来独立一张卡太占首屏，但这句话必须还能看到。
+            Text(
+                text = "只做检索：不会自动删除；删除会先移入回收站，30 天内可恢复。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (indexState.isRunning) {
                 val total = indexState.signatureTotal
                 LinearProgressIndicator(
@@ -384,115 +522,42 @@ private fun IndexCard(indexState: IndexState, onStart: () -> Unit, onCancel: () 
     }
 }
 
-@Composable
-private fun ReadOnlyNotice() {
-    Surface(
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(text = "不自动删除 · 只做检索", style = MaterialTheme.typography.titleSmall)
-            // 说明文字用小字号压缩到两行以内：这句是免责声明，不该挤占首屏空间。
-            Text(
-                text = "写操作都需你确认；删除只是移入回收站，30 天内可恢复。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
 /**
- * 清理页顶部的两个快捷入口。
- *
- * v0.2 起回收站不再在底栏，这里是最显眼的入口；识图（本地相似图 + 联网搜图）
- * 同样只从清理页进入，所以两张卡并排放在首屏。
+ * 分组项的数据壳：成员与评分由 CleanupScreen 统一加载后传入，这里只把
+ * 「本组已选集合」和「本组建议」翻译成卡片需要的回调，不嵌套任何列表。
  */
 @Composable
-private fun EntryArea(
-    trashCount: Int,
-    trashTotalBytes: Long,
-    onOpenTrash: () -> Unit,
-    onOpenImageFind: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        EntryCard(
-            title = "回收站",
-            subtitle = "${formatCount(trashCount.toLong())} 项 · ${formatBytes(trashTotalBytes)} · 保留 30 天",
-            onClick = onOpenTrash,
-            modifier = Modifier.weight(1f),
-        )
-        EntryCard(
-            title = "识图",
-            subtitle = "以图搜图 · 本地 + 联网",
-            onClick = onOpenImageFind,
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
-
-@Composable
-private fun EntryCard(
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Card(onClick = onClick, modifier = modifier) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(text = title, style = MaterialTheme.typography.titleSmall)
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-/**
- * 分组卡的数据壳：先异步加载成员，再用 [QualityScorer] 算出保留建议，最后交给
- * [QualityGroupCard] 渲染。评分放在这里而不是卡片内部，是为了让 CleanupScreen 的
- * 一键应用逻辑（移入回收站 + Snackbar 撤销 + 刷新）保持集中。
- */
-@Composable
-private fun QualityGroupItem(
+private fun GroupItem(
     group: DuplicateGroupEntity,
-    loadMembers: suspend (Long) -> List<MediaEntity>,
+    members: List<MediaEntity>,
+    assessment: GroupQualityAssessment,
+    selectedIds: Set<Long>,
     loadThumbnail: suspend (MediaEntity) -> File?,
     hasWriteAccess: Boolean,
+    onToggleTrash: (Long) -> Unit,
+    onSelectSuggested: (List<Long>) -> Unit,
+    onApply: (List<Long>) -> Unit,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
     onCompare: () -> Unit,
-    onApplyKeep: (KeepSuggestion) -> Unit,
 ) {
-    val members by produceState(initialValue = emptyList<MediaEntity>(), group.groupId) {
-        value = loadMembers(group.groupId)
+    val memberIds = remember(members) { members.map { it.id } }
+    val groupSelected = remember(selectedIds, memberIds) {
+        memberIds.filter { it in selectedIds }
     }
-    // 成员是同一批对象时才复用评分结果，避免每次重组都重算。
-    val assessment = remember(members) { QualityScorer.assess(members) }
-    val ids = remember(members) { members.map { it.id } }
     QualityGroupCard(
         group = group,
         members = members,
         assessment = assessment,
         loadThumbnail = loadThumbnail,
+        selectedTrashIds = selectedIds,
+        onToggleTrash = onToggleTrash,
+        onSelectSuggested = { onSelectSuggested(assessment.trashIds) },
+        onApply = { onApply(groupSelected) },
         onOpenViewer = { media ->
-            val index = ids.indexOf(media.id).coerceAtLeast(0)
-            onOpenViewer(ids, index)
+            val index = memberIds.indexOf(media.id).coerceAtLeast(0)
+            onOpenViewer(memberIds, index)
         },
         onCompare = onCompare,
-        onApplyKeep = onApplyKeep,
         hasWriteAccess = hasWriteAccess,
     )
 }

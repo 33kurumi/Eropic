@@ -22,7 +22,7 @@ data class FolderNode(
     val totalCount: Long,
     /** 含所有子目录的总字节数。 */
     val totalBytes: Long,
-    /** 子节点，按 totalBytes 降序、name 升序。 */
+    /** 子节点，按名字升序（不区分大小写）；总大小只用于展示，不参与排序。 */
     val children: List<FolderNode>,
     /** 所在层级：顶层目录为 0，逐级 +1；根目录节点为 0。 */
     val depth: Int,
@@ -33,7 +33,8 @@ data class FolderNode(
  *
  * 纯 Kotlin 实现，不依赖 Android，便于单元测试。
  * 用 "/" 切分 relativePath 逐级建树：中间目录即使没有直属图片也会建节点（directCount = 0）；
- * 各级 total 自底向上累计；兄弟节点按 totalBytes 降序、name 升序排序。
+ * 各级 total 自底向上累计；兄弟节点按名字升序（不区分大小写）排序。
+ * 大小只用于展示：用户反馈文件夹要像文件管理器那样按标题排，体积大不代表更常用。
  */
 object FolderTreeBuilder {
 
@@ -50,12 +51,17 @@ object FolderTreeBuilder {
         val children: MutableMap<String, MutableNode> = LinkedHashMap()
     }
 
-    /** 兄弟节点排序：先按总大小降序，再按名字升序。 */
+    /**
+     * 兄弟节点排序：按名字升序，不区分大小写（album → Camera → zebra）。
+     *
+     * 用 lowercase() 归一化后再比较：中文目录名小写后原样返回，等价于按码点排；
+     * 同名只差大小写时再按原始写法兜底，保证顺序稳定。
+     */
     private val siblingOrder: Comparator<MutableNode> =
-        compareByDescending<MutableNode> { it.totalBytes }.thenBy { it.name }
+        compareBy<MutableNode> { it.name.lowercase() }.thenBy { it.name }
 
     /**
-     * 返回顶层节点：按 totalBytes 降序；根目录节点（若存在）固定排在最后。
+     * 返回顶层节点：按名字升序；根目录节点（若存在）固定排在最后。
      * 入参可为空列表，返回空列表。
      */
     fun build(rows: List<FolderRow>): List<FolderNode> {
@@ -74,7 +80,7 @@ object FolderTreeBuilder {
             }
         }
 
-        // 先自底向上算完 total，兄弟排序才能读到正确的 totalBytes。
+        // 先自底向上算完 total，节点上的 totalCount/totalBytes 才是正确的聚合值。
         roots.values.forEach { computeTotals(it) }
 
         val nodes = roots.values.sortedWith(siblingOrder).map { toNode(it) }.toMutableList()

@@ -57,16 +57,23 @@ data class SimilarityQuery(
  * 用 enum 而不是 sealed class：这里的成员只有「服务商」一个维度，每个服务商的展示名与官网是固定数据，
  * UI 用 `entries` 直接铺一排按钮；具体某次搜索成功与否由 [OnlineSearchResult] 表达，不需要为结果再造一层类型。
  * [homeUrl] 是兜底入口：接口失效时 UI 还能让用户去官网手动传图。
+ *
+ * v0.3 只保留四家：能稳定拿到结果链接的三家 + 二次元专精的 SauceNAO（需要 API Key）。
+ * 被删掉的 Bing / TinEye / IQDB / trace.moe 要么接口需要 key、要么没有可复用的结果页，留着只是摆设。
+ * 枚举顺序即 UI 上按钮顺序。
  */
 enum class ReverseImageProvider(val label: String, val homeUrl: String) {
+    /** Google Lens：匿名上传最稳的一家，通用图片覆盖最好。 */
     GOOGLE_LENS("Google Lens", "https://lens.google.com/"),
+
+    /** Yandex 识图：实拍与二次元都能用，匿名上传后可拿到结果页链接。 */
     YANDEX("Yandex", "https://yandex.com/images/"),
-    BING("Bing", "https://www.bing.com/images"),
-    TINEYE("TinEye", "https://tineye.com/"),
+
+    /** SauceNAO：pixiv / twitter / danbooru 等索引，二次元识图最准；必须先在设置里填 API Key。 */
     SAUCENAO("SauceNAO", "https://saucenao.com/"),
+
+    /** ascii2d：二次元以图搜图，匿名可用。 */
     ASCII2D("ascii2d", "https://ascii2d.net/"),
-    IQDB("IQDB", "https://iqdb.org/"),
-    TRACEMOE("trace.moe", "https://trace.moe/"),
 }
 
 /**
@@ -80,7 +87,10 @@ enum class ReverseImageProvider(val label: String, val homeUrl: String) {
 data class OnlineSearchResult(
     val provider: ReverseImageProvider,
     val ok: Boolean,
-    /** 成功时可直接用浏览器打开的结果页；失败时为 null。 */
+    /**
+     * 成功时可直接用浏览器打开的结果页；失败时为 null。
+     * SauceNAO 没有可复用的结果页，这里返回的是「最相似作品在原站的页面」（data.ext_urls）。
+     */
     val resultUrl: String? = null,
     /** 失败原因（中文）；成功时为 null。 */
     val message: String? = null,

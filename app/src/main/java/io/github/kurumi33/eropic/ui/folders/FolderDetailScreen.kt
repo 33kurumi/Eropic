@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
+import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
@@ -52,6 +53,8 @@ fun FolderDetailScreen(
     hasWriteAccess: Boolean = false,
     /** 初始是否聚合子文件夹：网格页点「查看本层全部图片」时把网格页的开关状态带进来。 */
     initialIncludeSubfolders: Boolean = false,
+    /** 初始排序：外层目录树页/网格页选过的排序；为 null 时跟随图库当前排序。 */
+    initialSort: SortOrder? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -64,8 +67,15 @@ fun FolderDetailScreen(
     // 只有非根目录的开关才生效；根目录下两种取值查到的都是全部照片，统一按"不聚合"展示。
     val effectiveIncludeSubfolders = includeSubfolders && folderPath.isNotEmpty()
 
-    val items = remember(folderPath, effectiveIncludeSubfolders) {
-        viewModel.folderMedia(folderPath, effectiveIncludeSubfolders)
+    // 排序：进页面时继承外层选过的排序（initialSort），之后用户在本页改就只影响本页。
+    // SortOrder 不是 Saveable 类型，存枚举名；initialSort 作为 key，从网格页带着排序进来时能生效。
+    var sortName by rememberSaveable(folderPath, initialSort) { mutableStateOf(initialSort?.name) }
+    val sortOverride = remember(sortName) { sortOrderFromName(sortName) }
+    val gallerySort by viewModel.sortOrder.collectAsStateWithLifecycle()
+    val activeSort = sortOverride ?: gallerySort
+
+    val items = remember(folderPath, effectiveIncludeSubfolders, activeSort) {
+        viewModel.folderMedia(folderPath, effectiveIncludeSubfolders, activeSort)
     }.collectAsLazyPagingItems()
 
     var selectedIds by rememberSaveable(folderPath) { mutableStateOf<Set<Long>>(emptySet()) }
@@ -85,7 +95,7 @@ fun FolderDetailScreen(
                 onClose = { selectedIds = emptySet() },
                 onSelectAll = {
                     scope.launch {
-                        selectedIds = viewModel.folderIds(folderPath, effectiveIncludeSubfolders).toSet()
+                        selectedIds = viewModel.folderIds(folderPath, effectiveIncludeSubfolders, activeSort).toSet()
                     }
                 },
                 onFavorite = {
@@ -134,6 +144,12 @@ fun FolderDetailScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                },
+                actions = {
+                    FolderSortMenu(
+                        activeSort = activeSort,
+                        onSelect = { order -> sortName = order.name },
+                    )
                 },
             )
         }
@@ -187,7 +203,7 @@ fun FolderDetailScreen(
                             }
                         } else {
                             scope.launch {
-                                val ids = viewModel.folderIds(folderPath, effectiveIncludeSubfolders)
+                                val ids = viewModel.folderIds(folderPath, effectiveIncludeSubfolders, activeSort)
                                 val index = ids.indexOf(item.id)
                                 // 索引正好在变（后台同步/重新索引）时可能查不到这张图，
                                 // 以前会 coerce 成 0，结果打开的是另一张。

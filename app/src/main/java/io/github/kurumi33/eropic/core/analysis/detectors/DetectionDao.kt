@@ -78,6 +78,27 @@ interface DetectionDao {
     )
     suspend fun burstCandidates(sinceMs: Long, limit: Int): List<MediaEntity>
 
+    /**
+     * 大图（v0.3）：按分辨率从大到小，像素数 >= [minPixels]。
+     *
+     * 与 [largeFiles] 的区别：那个按文件体积（MB），这个按像素（宽×高）。
+     * 一张 12MP 的 PNG 截图可能只有 1MB，而一张 8MP 的 JPG 有 6MB —— 两种"大"不是一回事，
+     * 用户要的是"找大图"（分辨率高、放大看细节、可能值得压缩/转存），所以单列一类。
+     */
+    @Query(
+        "SELECT * FROM media_item WHERE isPresent = 1 AND width > 0 AND height > 0 " +
+            "AND (width * height) >= :minPixels " +
+            "ORDER BY (width * height) DESC, sizeBytes DESC, id ASC LIMIT :limit",
+    )
+    suspend fun largeImages(minPixels: Int, limit: Int): List<MediaEntity>
+
+    /** 大图的命中总数与总字节（不受 [largeImages] 的 LIMIT 影响）。 */
+    @Query(
+        "SELECT COUNT(*) AS hits, COALESCE(SUM(sizeBytes), 0) AS bytes FROM media_item " +
+            "WHERE isPresent = 1 AND width > 0 AND height > 0 AND (width * height) >= :minPixels",
+    )
+    suspend fun largeImageSummary(minPixels: Int): LargeFileSummaryRow
+
     /** 小图：按面积从小到大；面积用 width*height 现算，避免再加一列派生数据。 */
     @Query(
         "SELECT * FROM media_item WHERE isPresent = 1 AND width > 0 AND height > 0 " +

@@ -1,5 +1,6 @@
 package io.github.kurumi33.eropic.ui.settings
 
+import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -40,6 +41,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -95,35 +98,44 @@ fun SettingsScreen(viewModel: EropicViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // v0.3：每个分组前加小标题（titleSmall），卡片间距 16dp，分组之间不再糊成一片。
+            SettingsGroupTitle("外观")
             AppearanceCard(settings = settings, viewModel = viewModel)
 
+            SettingsGroupTitle("图库与查看")
+            GalleryViewCard(settings = settings, viewModel = viewModel)
+
+            SettingsGroupTitle("清理")
+            CleanupSettingsCard(settings = settings, viewModel = viewModel)
+
+            SettingsGroupTitle("联网识图")
+            OnlineImageSearchCard(settings = settings, viewModel = viewModel)
+
+            SettingsGroupTitle("扫描范围")
+            ScanScopeCard(settings = settings, viewModel = viewModel)
+
+            SettingsGroupTitle("后台与电量")
+            BackgroundCard(settings = settings, viewModel = viewModel)
+
+            SettingsGroupTitle("存储权限")
+            StorageAccessCard(
+                hasWriteAccess = hasWriteAccess,
+                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
+            )
+
+            SettingsGroupTitle("缩略图缓存")
             ThumbnailCacheCard(
                 settings = settings,
                 cacheSizeBytes = thumbnailCacheSize,
                 viewModel = viewModel,
             )
 
-            BackgroundCard(settings = settings, viewModel = viewModel)
-
-            GalleryViewCard(settings = settings, viewModel = viewModel)
-
-            CleanupSettingsCard(settings = settings, viewModel = viewModel)
-
-            ScanScopeCard(settings = settings, viewModel = viewModel)
-
-            MorePagesCard(viewModel = viewModel)
-
-            StorageAccessCard(
-                hasWriteAccess = hasWriteAccess,
-                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
-            )
-
+            SettingsGroupTitle("本地索引")
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "本地索引", style = MaterialTheme.typography.titleMedium)
                     Text(text = "已索引 " + formatCount(count) + " 张 · " + formatBytes(totalSize))
                     Text(
                         text = "任务状态：" + indexState.phase.name,
@@ -139,23 +151,12 @@ fun SettingsScreen(viewModel: EropicViewModel) {
                 }
             }
 
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "M4 范围", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "已实现：浏览/排序/收藏/查看器/幻灯片、文件夹树与聚合、缩略图磁盘缓存、自动同步、多选、" +
-                            "指纹与精确/相似重复分组、八类清理入口与组合筛选、对比预览、保留建议、清理报告、" +
-                            "真实移动/复制/重命名文件、空文件夹管理、回收站（可配置保留期，可撤销/恢复/彻底删除）、" +
-                            "操作历史与撤销闭环、搜索与保存筛选、存储总览、崩溃日志。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            SettingsGroupTitle("更多页面")
+            MorePagesCard(viewModel = viewModel)
 
+            SettingsGroupTitle("关于")
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "关于", style = MaterialTheme.typography.titleMedium)
                     Text(text = "Eropic " + versionName + " · 本地优先 · 仅「联网搜图」时联网")
                     Text(
                         text = "开源地址：github.com/33kurumi/Eropic",
@@ -197,14 +198,107 @@ fun SettingsScreen(viewModel: EropicViewModel) {
     }
 }
 
+/**
+ * 设置页的分组小标题：配合 16dp 的卡片间距，让各分组一眼能分开。
+ */
 @Composable
-private fun AppearanceCard(settings: AppSettings, viewModel: EropicViewModel) {
-    var sortMenuOpen by remember { mutableStateOf(false) }
+private fun SettingsGroupTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+    )
+}
+
+/**
+ * 联网识图：SauceNAO 的 API Key。
+ *
+ * 只有 SauceNAO 需要 key（免费注册后拿到）；Google Lens / Yandex / ascii2d 不填也能用。
+ * key 存在本地 DataStore，只在请求 SauceNAO 时带上。
+ */
+@Composable
+private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewModel) {
+    val context = LocalContext.current
+    var showKey by remember { mutableStateOf(false) }
+    // 草稿随已保存的 key 同步：保存成功后 settings 变化，输入框会换成新值。
+    var keyDraft by remember(settings.sauceNaoApiKey) { mutableStateOf(settings.sauceNaoApiKey) }
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "外观与图库", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = "SauceNAO 的接口需要免费的 API Key（在 saucenao.com 注册后获取）。" +
+                    "不填也能用 Google Lens / Yandex / ascii2d。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
+            OutlinedTextField(
+                value = keyDraft,
+                onValueChange = { keyDraft = it },
+                label = { Text("SauceNAO API Key") },
+                placeholder = { Text("粘贴 saucenao.com 给你的 key") },
+                singleLine = true,
+                visualTransformation = if (showKey) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = { viewModel.setSauceNaoApiKey(keyDraft) },
+                    enabled = keyDraft.trim() != settings.sauceNaoApiKey,
+                ) { Text("保存") }
+                TextButton(onClick = { showKey = !showKey }) {
+                    Text(if (showKey) "隐藏 Key" else "显示 Key")
+                }
+            }
+
+            // 文字按钮：直接跳到 SauceNAO 主页去注册/登录拿 key。
+            TextButton(
+                onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://saucenao.com/")),
+                        )
+                    }
+                },
+            ) { Text("打开 saucenao.com") }
+
+            Text(
+                text = if (settings.sauceNaoApiKey.isEmpty()) {
+                    "当前未配置 SauceNAO Key。"
+                } else {
+                    "当前已配置（" + settings.sauceNaoApiKey.length + " 个字符）。"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (keyDraft.trim() != settings.sauceNaoApiKey) {
+                Text(
+                    text = "有未保存的修改。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 外观分组：主题与取色。网格列数、排序等偏浏览的开关在 GalleryViewCard 里（v0.3 按分组拆开）。
+ */
+@Composable
+private fun AppearanceCard(settings: AppSettings, viewModel: EropicViewModel) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(text = "主题", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ThemeMode.entries.forEach { mode ->
@@ -222,47 +316,6 @@ private fun AppearanceCard(settings: AppSettings, viewModel: EropicViewModel) {
                 checked = settings.dynamicColor,
                 onCheckedChange = viewModel::setDynamicColor,
             )
-
-            Text(text = "每行显示", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                (3..6).forEach { columns ->
-                    FilterChip(
-                        selected = settings.gridColumns == columns,
-                        onClick = { viewModel.setGridColumns(columns) },
-                        label = { Text(columns.toString() + " 列") },
-                    )
-                }
-            }
-
-            SettingSwitchRow(
-                title = "显示张数与总大小",
-                subtitle = "标题栏副标题是否显示「N 张 · X GB」。",
-                checked = settings.showMeta,
-                onCheckedChange = viewModel::setShowMeta,
-            )
-
-            Text(text = "默认排序", style = MaterialTheme.typography.labelLarge)
-            Box {
-                OutlinedButton(onClick = { sortMenuOpen = true }) {
-                    Text(settings.defaultSort.label)
-                }
-                DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
-                    SortOrder.entries.forEach { order ->
-                        DropdownMenuItem(
-                            text = { Text(order.label) },
-                            onClick = {
-                                viewModel.setDefaultSort(order)
-                                sortMenuOpen = false
-                            },
-                            trailingIcon = {
-                                if (settings.defaultSort == order) {
-                                    Icon(imageVector = Icons.Filled.Check, contentDescription = null)
-                                }
-                            },
-                        )
-                    }
-                }
-            }
         }
     }
 }
@@ -275,7 +328,6 @@ private fun ThumbnailCacheCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "缩略图缓存", style = MaterialTheme.typography.titleMedium)
             Text(
                 text = "图库网格改用 320px 小图，滚动更省内存和电。缓存存在应用缓存目录，不会动你的照片；" +
                     "清空或卸载随时可丢弃，之后会按需重建。",
@@ -339,7 +391,6 @@ private fun ThumbnailCacheCard(
 private fun BackgroundCard(settings: AppSettings, viewModel: EropicViewModel) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "后台与电量", style = MaterialTheme.typography.titleMedium)
             Text(
                 text = "计算指纹、查重是重活，只在你在应用内点「开始」或自动续算时跑，不会常驻后台。",
                 style = MaterialTheme.typography.bodySmall,
@@ -376,7 +427,6 @@ private fun StorageAccessCard(
 ) {
     Card(onClick = onOpenPermission, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(text = "文件权限", style = MaterialTheme.typography.titleMedium)
             Text(
                 text = if (hasWriteAccess) {
                     "已授予「所有文件访问」：可以真实移动文件、把图片移入 Eropic 回收站并恢复。";
@@ -395,6 +445,7 @@ private fun StorageAccessCard(
         }
     }
 }
+
 @Composable
 private fun SettingSwitchRow(
     title: String,
@@ -420,13 +471,54 @@ private fun SettingSwitchRow(
 }
 
 /**
- * 图库显示与查看器偏好（M4 · T3 的捏合列数、日期分组、幻灯片都由这里配置）。
+ * 图库与查看分组：网格列数、标题栏元信息、默认排序、日期分组、幻灯片间隔。
  */
 @Composable
 private fun GalleryViewCard(settings: AppSettings, viewModel: EropicViewModel) {
+    var sortMenuOpen by remember { mutableStateOf(false) }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "图库与查看", style = MaterialTheme.typography.titleMedium)
+            Text(text = "每行显示", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                (3..6).forEach { columns ->
+                    FilterChip(
+                        selected = settings.gridColumns == columns,
+                        onClick = { viewModel.setGridColumns(columns) },
+                        label = { Text(columns.toString() + " 列") },
+                    )
+                }
+            }
+
+            SettingSwitchRow(
+                title = "显示张数与总大小",
+                subtitle = "标题栏副标题是否显示「N 张 · X GB」。",
+                checked = settings.showMeta,
+                onCheckedChange = viewModel::setShowMeta,
+            )
+
+            Text(text = "默认排序", style = MaterialTheme.typography.labelLarge)
+            Box {
+                OutlinedButton(onClick = { sortMenuOpen = true }) {
+                    Text(settings.defaultSort.label)
+                }
+                DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                    SortOrder.entries.forEach { order ->
+                        DropdownMenuItem(
+                            text = { Text(order.label) },
+                            onClick = {
+                                viewModel.setDefaultSort(order)
+                                sortMenuOpen = false
+                            },
+                            trailingIcon = {
+                                if (settings.defaultSort == order) {
+                                    Icon(imageVector = Icons.Filled.Check, contentDescription = null)
+                                }
+                            },
+                        )
+                    }
+                }
+            }
 
             Text(text = "日期分组", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -470,7 +562,6 @@ private fun GalleryViewCard(settings: AppSettings, viewModel: EropicViewModel) {
 private fun CleanupSettingsCard(settings: AppSettings, viewModel: EropicViewModel) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "清理与回收站", style = MaterialTheme.typography.titleMedium)
 
             Text(text = "回收站保留时长", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -530,7 +621,6 @@ private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "扫描范围", style = MaterialTheme.typography.titleMedium)
 
             SettingSwitchRow(
                 title = "包含隐藏目录",
@@ -599,7 +689,6 @@ private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
 private fun MorePagesCard(viewModel: EropicViewModel) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(text = "更多页面", style = MaterialTheme.typography.titleMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { viewModel.openScreen(AppScreen.Search) },

@@ -87,6 +87,13 @@ data class AppSettings(
     val scanIncludeHidden: Boolean = false,
     /** M4：扫描时排除的目录（相对路径，不带结尾斜杠）。 */
     val scanExcludedDirs: List<String> = emptyList(),
+    /**
+     * v0.3：SauceNAO 的 API Key。
+     *
+     * SauceNAO 是少数必须带 key 的识图服务（免费注册后拿到个人 key）；
+     * 不填也能用 Google Lens / Yandex / ascii2d，所以默认空串。
+     */
+    val sauceNaoApiKey: String = "",
 ) {
     /** 兼容 M4 的布尔语义：是否插入日期分组标题（= 分组粒度不是"不分组"）。 */
     val dateGrouping: Boolean get() = dateGroupMode != DateGroupMode.NONE

@@ -79,7 +79,9 @@ fun CleanupReportScreen(
             val screenshots = viewModel.screenshots()
             val blurry = viewModel.blurred()
             val bursts = viewModel.bursts()
-            val small = viewModel.smallImages()
+            // v0.3：清理页的「小图」已换成「大图」（按分辨率），报告同步换口径；
+            // 用 summary 而不是列表，避免被 find() 的 LIMIT 截断导致报告偏小。
+            val largeImages = viewModel.largeImageSummary()
 
             val rows = listOf(
                 ReportRow(
@@ -125,10 +127,10 @@ fun CleanupReportScreen(
                     hint = "${bursts.groups.size} 组 · 同目录 5 秒内连续 3 张以上",
                 ),
                 ReportRow(
-                    label = "小图",
-                    count = small.size.toLong(),
-                    bytes = small.sumOf { it.sizeBytes },
-                    hint = "面积小于 200×200",
+                    label = "大图",
+                    count = largeImages.hits.toLong(),
+                    bytes = largeImages.bytes,
+                    hint = "分辨率 ≥ 800 万像素（按像素，不是体积）",
                 ),
             )
 

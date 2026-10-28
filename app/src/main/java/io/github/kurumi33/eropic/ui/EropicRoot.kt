@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -74,10 +75,12 @@ import io.github.kurumi33.eropic.ui.viewer.ImageViewerScreen
 private data class Tab(val label: String, val icon: ImageVector)
 
 /**
- * 应用根：底部 4 个 Tab（图库 / 文件夹 / 清理 / 设置）+ 叠加式的二级页面。
+ * 应用根：底部 5 个 Tab（图库 / 文件夹 / 清理 / 识图 / 设置）+ 叠加式的二级页面。
  *
- * v0.2 起「回收站」不再是底栏 Tab（底部还要继续加功能，避免拥挤），改由「清理」页进入；
- * 因此这里多了一个 [AppScreen.Trash] 路由，其余二级页路由保持不变。
+ * v0.2 起「回收站」不再是底栏 Tab（底部还要继续加功能，避免拥挤），改由「清理」页顶栏的垃圾桶进入；
+ * v0.3 起「识图」占用了原来回收站的位置（用户要求），清理页里那两张入口卡随之删除。
+ * 因此这里保留 [AppScreen.Trash] / [AppScreen.ImageFind] 两个路由：前者给垃圾桶与通知跳转用，
+ * 后者给图库的「以图搜图」快捷入口用（识图 tab 本身不显示返回箭头）。
  */
 @Composable
 fun EropicRoot(viewModel: EropicViewModel) {
@@ -171,6 +174,7 @@ fun EropicRoot(viewModel: EropicViewModel) {
             Tab("图库", Icons.Filled.PhotoLibrary),
             Tab("文件夹", Icons.Filled.Folder),
             Tab("清理", Icons.Filled.CleaningServices),
+            Tab("识图", Icons.Filled.ImageSearch),
             Tab("设置", Icons.Filled.Settings),
         )
     }
@@ -223,6 +227,12 @@ fun EropicRoot(viewModel: EropicViewModel) {
                         viewModel = viewModel,
                         onOpenViewer = viewModel::openViewer,
                         hasWriteAccess = hasWriteAccess,
+                    )
+                    // 识图作为底栏 Tab：不显示返回箭头（onBack = null）。
+                    3 -> ImageFindScreen(
+                        viewModel = viewModel,
+                        onBack = null,
+                        onOpenViewer = viewModel::openViewer,
                     )
                     else -> SettingsScreen(viewModel)
                 }

@@ -5,6 +5,7 @@ import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
 import io.github.kurumi33.eropic.core.analysis.detectors.BlurDetector
 import io.github.kurumi33.eropic.core.analysis.detectors.BurstDetector
 import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileDetector
+import io.github.kurumi33.eropic.core.analysis.detectors.LargeImageDetector
 import io.github.kurumi33.eropic.core.analysis.detectors.OldPhotoDetector
 import io.github.kurumi33.eropic.core.analysis.detectors.ScreenshotDetector
 import io.github.kurumi33.eropic.core.analysis.detectors.SmallImageDetector
@@ -55,6 +56,7 @@ class AppContainer(context: Context) {
     val blurDetector: BlurDetector = BlurDetector(detectionDao)
     val burstDetector: BurstDetector = BurstDetector(detectionDao)
     val smallImageDetector: SmallImageDetector = SmallImageDetector(detectionDao)
+    val largeImageDetector: LargeImageDetector = LargeImageDetector(detectionDao)
 
     // ---- M3 写操作（真实移动 / 回收站；需要 MANAGE_EXTERNAL_STORAGE） ----
 

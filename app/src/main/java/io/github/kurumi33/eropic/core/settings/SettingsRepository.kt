@@ -33,6 +33,7 @@ class SettingsRepository(private val context: Context) {
         val SIMILARITY = stringPreferencesKey("similarity")
         val SCAN_INCLUDE_HIDDEN = booleanPreferencesKey("scan_include_hidden")
         val SCAN_EXCLUDED_DIRS = stringPreferencesKey("scan_excluded_dirs")
+        val SAUCE_NAO_API_KEY = stringPreferencesKey("sauce_nao_api_key")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { prefs ->
@@ -58,6 +59,7 @@ class SettingsRepository(private val context: Context) {
             similarity = SimilarityLevel.fromName(prefs[Keys.SIMILARITY]),
             scanIncludeHidden = prefs[Keys.SCAN_INCLUDE_HIDDEN] ?: defaults.scanIncludeHidden,
             scanExcludedDirs = parseDirs(prefs[Keys.SCAN_EXCLUDED_DIRS]),
+            sauceNaoApiKey = prefs[Keys.SAUCE_NAO_API_KEY] ?: defaults.sauceNaoApiKey,
         )
     }
 
@@ -113,6 +115,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setSimilarity(level: SimilarityLevel) =
         context.settingsDataStore.edit { it[Keys.SIMILARITY] = level.name }
+
+    /** v0.3：SauceNAO API Key（去掉首尾空白；空串表示未配置）。 */
+    suspend fun setSauceNaoApiKey(raw: String) =
+        context.settingsDataStore.edit { it[Keys.SAUCE_NAO_API_KEY] = raw.trim() }
 
     suspend fun setScanIncludeHidden(enabled: Boolean) =
         context.settingsDataStore.edit { it[Keys.SCAN_INCLUDE_HIDDEN] = enabled }

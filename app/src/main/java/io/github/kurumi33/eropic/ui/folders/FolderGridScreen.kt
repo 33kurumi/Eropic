@@ -60,6 +60,7 @@ import io.github.kurumi33.eropic.core.folders.breadcrumbsOf
 import io.github.kurumi33.eropic.core.folders.findFolderNode
 import io.github.kurumi33.eropic.core.folders.folderStatsOf
 import io.github.kurumi33.eropic.core.media.MediaUris
+import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
@@ -83,6 +84,8 @@ internal fun FolderGridScreen(
     path: String,
     includeSubfolders: Boolean,
     refreshToken: Long,
+    sortOverride: SortOrder?,
+    onSortSelected: (SortOrder) -> Unit,
     onToggleIncludeSubfolders: (Boolean) -> Unit,
     onOpenFolder: (String) -> Unit,
     onUp: () -> Unit,
@@ -95,6 +98,10 @@ internal fun FolderGridScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val columns = settings.gridColumns.coerceIn(2, 4)
     val thumbnailsEnabled = settings.thumbnailCacheEnabled
+
+    // 排序与本页一致：用户在外层（目录树/网格切换处）选过就跟着外层走，否则跟随图库当前排序。
+    val gallerySort by viewModel.sortOrder.collectAsStateWithLifecycle()
+    val activeSort = sortOverride ?: gallerySort
 
     // 根层级就是整库：既没有"上一级"，聚合开关也没有意义（两种取值查到的都是全部照片）。
     val includeSubfoldersEnabled = path.isNotEmpty()
@@ -115,8 +122,8 @@ internal fun FolderGridScreen(
     val title = crumbs.lastOrNull()?.name ?: "根目录"
 
     // 只有 path/聚合开关变化时才重新订阅分页流，开关切换会换一条新 Flow。
-    val images = remember(path, effectiveIncludeSubfolders) {
-        viewModel.folderMedia(path, effectiveIncludeSubfolders)
+    val images = remember(path, effectiveIncludeSubfolders, activeSort) {
+        viewModel.folderMedia(path, effectiveIncludeSubfolders, activeSort)
     }.collectAsLazyPagingItems()
 
     // ViewModel 没有暴露"按目录取最新一张"的 API，这里直连 AppContainer 的 DAO；
@@ -166,6 +173,7 @@ internal fun FolderGridScreen(
                 }
             },
             actions = {
+                FolderSortMenu(activeSort = activeSort, onSelect = onSortSelected)
                 IconButton(onClick = onSwitchToList) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.List,
@@ -277,7 +285,7 @@ internal fun FolderGridScreen(
                             thumbnailProvider = { media -> viewModel.thumbnailFile(media) },
                             onClick = {
                                 scope.launch {
-                                    val ids = viewModel.folderIds(path, effectiveIncludeSubfolders)
+                                    val ids = viewModel.folderIds(path, effectiveIncludeSubfolders, activeSort)
                                     val startIndex = ids.indexOf(item.id)
                                     // 索引正在更新时可能查不到这一张，别打开成别的照片。
                                     if (startIndex >= 0) {
