@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -18,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -60,6 +62,8 @@ private data class CleanupReportData(
 fun CleanupReportScreen(
     viewModel: EropicViewModel,
     onBack: () -> Unit,
+    // v0.6：回清理页的入口回调（由 EropicRoot 传入，跳回清理 Tab）。
+    onGoCleanup: () -> Unit,
 ) {
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
@@ -143,7 +147,18 @@ fun CleanupReportScreen(
     Scaffold(
         topBar = {
             // v0.5：二级页也用统一顶栏，标题字号、副标题占位与一级页保持一致。
-            EropicTopBar(title = "清理报告", onBack = onBack)
+            // v0.6：右上角补一个「去清理」，看完报告可以一步回到清理页动手。
+            // 本页没有副标题，subtitle 显式传 null（传空字符串会多占一行，标题看起来偏高）。
+            EropicTopBar(
+                title = "清理报告",
+                subtitle = null,
+                onBack = onBack,
+                actions = {
+                    TextButton(onClick = onGoCleanup) {
+                        Text("去清理")
+                    }
+                },
+            )
         },
     ) { innerPadding ->
         val current = data
@@ -249,6 +264,26 @@ fun CleanupReportScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(4.dp),
                 )
+            }
+            // v0.6：报告页原本没有「下一步」，用户得自己按返回；这里给一个明确的主按钮。
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "回到清理页处理这些图片",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        onClick = onGoCleanup,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("去清理页面", style = MaterialTheme.typography.titleSmall)
+                    }
+                }
             }
         }
     }

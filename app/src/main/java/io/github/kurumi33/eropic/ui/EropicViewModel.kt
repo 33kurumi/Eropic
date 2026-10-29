@@ -344,6 +344,26 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     suspend fun distinctFolders(): List<String> = repository.distinctFolders()
 
+    // ---- v0.6 搜索历史（独立 DataStore，最多 50 条，本机保存） ----
+
+    val searchHistory: StateFlow<List<String>> = container.searchHistoryStore.history
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 记录一次搜索：去空白、去重、最新在前。只在用户真正提交/防抖结束后调用一次。 */
+    fun recordSearch(query: String) {
+        viewModelScope.launch { container.searchHistoryStore.add(query) }
+    }
+
+    /** 删除单条搜索历史。 */
+    fun deleteSearchHistory(entry: String) {
+        viewModelScope.launch { container.searchHistoryStore.remove(entry) }
+    }
+
+    /** 一键清空搜索历史（不动图片、不动保存的筛选）。 */
+    fun clearSearchHistory() {
+        viewModelScope.launch { container.searchHistoryStore.clear() }
+    }
+
     // ---- M4 保存的筛选条件（B-17） ----
 
     val savedFilters: StateFlow<List<SavedFilterEntity>> = repository.savedFilters()
@@ -582,11 +602,8 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     // ---- v0.2：识图（本地相似图检索 + 联网以图搜图） ----
 
     private val imageSearch = ImageSearchRepository(container.appContext, container.database)
-    // API Key 用 lambda 读：设置里改了 key 不用重建 ViewModel / 重新进页面。
-    private val onlineSearchClient = OnlineImageSearch(
-        contentResolver = container.appContext.contentResolver,
-        sauceNaoApiKey = { settings.value.sauceNaoApiKey },
-    )
+    // v0.6：SauceNAO 的 key 内置在 OnlineImageSearch 里，不再从设置读，构造参数只剩 ContentResolver
+    private val onlineSearchClient = OnlineImageSearch(container.appContext.contentResolver)
 
     private val _similarityHits = MutableStateFlow<List<SimilarImageHit>>(emptyList())
 
@@ -641,17 +658,6 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     /** 识图页「从图库选图」用的候选：最近的一批图片。 */
     suspend fun searchSourceCandidates(limit: Int = 60): List<MediaEntity> =
         repository.byIds(repository.ids(SortOrder.DATE_DESC, false).take(limit))
-
-    /** v0.3：设置里是否已经填了 SauceNAO 的 API Key（识图页据此提示"去设置里填"）。 */
-    fun sauceNaoApiKeyConfigured(): Boolean = settings.value.sauceNaoApiKey.isNotBlank()
-
-    /** v0.3：保存 SauceNAO API Key（去空白后落 DataStore）。 */
-    fun setSauceNaoApiKey(key: String) {
-        viewModelScope.launch {
-            container.settingsRepository.setSauceNaoApiKey(key)
-            postMessage(if (key.isBlank()) "已清空 SauceNAO API Key" else "已保存 SauceNAO API Key")
-        }
-    }
 
     // ---- v0.5：文件夹级操作（重命名 / 删除到回收站 / 置顶 / 更换封面） ----
 

@@ -1,6 +1,7 @@
 package io.github.kurumi33.eropic.ui.folders
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -42,6 +44,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -65,7 +68,7 @@ import kotlinx.coroutines.launch
  * 「文件夹」页（v0.5）：列表（目录树）与网格（文件夹卡片）两种浏览方式。
  *
  * - 列表模式：把树按展开状态摊平成 List<FolderNode> 交给 LazyColumn，长列表也能懒加载；
- *   整行点击进入该目录的照片，行尾 ⋮ 打开文件夹操作弹层，行内右侧箭头展开/收起子目录。
+ *   整行点击进入该目录的照片，行尾 ⋮ 打开文件夹操作弹层，图标左侧的箭头展开/收起子目录。
  * - 网格模式：只展示当前这一层的子文件夹卡片（封面 + 名字 + 张数 + 大小），点卡片下钻，
  *   长按卡片打开同一个操作弹层；看图走列表模式或弹层里的「打开 / 选择」。
  *
@@ -88,8 +91,10 @@ fun FoldersSection(
     var gridPath by rememberSaveable { mutableStateOf("") }
     // 打开文件夹时是否包含子文件夹：网格页顶栏菜单里切换，进入详情页时作为初始值。
     var includeSubfolders by rememberSaveable { mutableStateOf(false) }
-    // 正在看图（详情页）的目录；null = 没在看图。列表与网格共用这一份状态。
-    var viewingPath by rememberSaveable { mutableStateOf<String?>(null) }
+    // 详情页的浏览栈：最后一项是当前看的目录，空表示没在看图。
+    // 用栈而不是单个路径：详情页顶部还能点「子文件夹」继续往下走，返回键才能一级级退回。
+    var detailStack by rememberSaveable { mutableStateOf(listOf<String>()) }
+    val viewingPath = detailStack.lastOrNull()
     // 从弹层「选择」进入时，详情页直接处于多选模式。
     var viewingNeedsSelection by rememberSaveable { mutableStateOf(false) }
 
@@ -126,11 +131,13 @@ fun FoldersSection(
             gridPath = ""
         }
     }
-    LaunchedEffect(tree, viewingPath) {
-        val path = viewingPath
-        if (path != null && path.isNotEmpty() && tree.isNotEmpty() && findFolderNode(tree, path) == null) {
-            viewingPath = null
-            viewingNeedsSelection = false
+    LaunchedEffect(tree, detailStack) {
+        if (tree.isEmpty()) return@LaunchedEffect
+        // 目录被删 / 改名后，栈里已经不存在的层级要退掉，避免详情页指着不存在的目录。
+        val valid = detailStack.filter { path -> path.isEmpty() || findFolderNode(tree, path) != null }
+        if (valid != detailStack) {
+            detailStack = valid
+            if (valid.isEmpty()) viewingNeedsSelection = false
         }
     }
 
@@ -144,19 +151,34 @@ fun FoldersSection(
         // 正在看图：两种布局共用同一个详情页。
         viewingPath != null -> {
             val path = viewingPath.orEmpty()
+            // 详情页顶部的「子文件夹」区域直接用树里的直接子目录，不再查库。
+            val subfolders = remember(tree, path) {
+                if (path.isEmpty()) tree else findFolderNode(tree, path)?.children.orEmpty()
+            }
             FolderDetailScreen(
                 viewModel = viewModel,
                 folderPath = path,
                 folderName = folderNameOf(tree, path),
                 onBack = {
-                    viewingPath = null
-                    viewingNeedsSelection = false
+                    // 在详情页里下钻过就退一层，否则回到列表 / 网格。
+                    if (detailStack.size > 1) {
+                        detailStack = detailStack.dropLast(1)
+                    } else {
+                        detailStack = emptyList()
+                        viewingNeedsSelection = false
+                    }
                 },
                 onOpenViewer = onOpenViewer,
                 hasWriteAccess = hasWriteAccess,
                 initialIncludeSubfolders = includeSubfolders && path.isNotEmpty(),
                 initialSort = sortOverride,
                 initialSelectionActive = viewingNeedsSelection,
+                subfolders = subfolders,
+                onOpenSubfolder = { subPath ->
+                    detailStack = detailStack + subPath
+                    viewingNeedsSelection = false
+                },
+                refreshToken = indexState.finishedAtMs + refreshTick,
             )
         }
 
@@ -184,11 +206,12 @@ fun FoldersSection(
                 expandedPaths = if (path in expandedPaths) expandedPaths - path else expandedPaths + path
             },
             onOpenFolder = { path ->
-                viewingPath = path
+                detailStack = listOf(path)
                 viewingNeedsSelection = false
             },
             onShowActions = { node -> actionsTarget = node },
             onSwitchToGrid = { gridLayout = true },
+            onOpenSearch = { viewModel.openScreen(AppScreen.Search) },
             activeSort = activeSort,
             onSortSelected = { order -> sortName = order.name },
         )
@@ -205,7 +228,7 @@ fun FoldersSection(
             hasWriteAccess = hasWriteAccess,
             onDismiss = { actionsTarget = null },
             onOpen = {
-                viewingPath = node.path
+                detailStack = listOf(node.path)
                 viewingNeedsSelection = false
             },
             onRename = { renameTarget = node },
@@ -213,7 +236,7 @@ fun FoldersSection(
             onTogglePin = { viewModel.setFolderPinned(relativePath, !pinned) },
             onDelete = { deleteTarget = node },
             onSelect = {
-                viewingPath = node.path
+                detailStack = listOf(node.path)
                 viewingNeedsSelection = true
             },
         )
@@ -270,6 +293,7 @@ private fun FolderTreeContent(
     onOpenFolder: (String) -> Unit,
     onShowActions: (FolderNode) -> Unit,
     onSwitchToGrid: () -> Unit,
+    onOpenSearch: () -> Unit,
     activeSort: SortOrder,
     onSortSelected: (SortOrder) -> Unit,
 ) {
@@ -292,6 +316,12 @@ private fun FolderTreeContent(
                     includeSubfolders = null,
                     onToggleIncludeSubfolders = {},
                 )
+                IconButton(onClick = onOpenSearch) {
+                    Icon(
+                        imageVector = Icons.Filled.Search,
+                        contentDescription = "搜索图片",
+                    )
+                }
                 IconButton(onClick = onSwitchToGrid) {
                     Icon(
                         imageVector = Icons.Filled.GridView,
@@ -317,7 +347,7 @@ private fun FolderTreeContent(
     }
 }
 
-/** 目录树的一行：缩进按深度，左侧文件夹图标，右侧展开箭头 + 操作菜单，点击进入图片。 */
+/** 目录树的一行：缩进按深度，文件夹图标左侧是展开箭头，行尾是操作菜单，点击进入图片。 */
 @Composable
 private fun FolderRowItem(
     node: FolderNode,
@@ -335,6 +365,29 @@ private fun FolderRowItem(
             .padding(start = (node.depth * 16).dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 展开箭头放在文件夹图标左边：有子目录才可点，没有子目录时留同宽占位，
+        // 这样所有行的文件夹图标左边界都在同一列上，缩进只由深度决定。
+        if (node.children.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onToggleExpand),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (expanded) {
+                        Icons.Filled.KeyboardArrowDown
+                    } else {
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight
+                    },
+                    contentDescription = if (expanded) "收起子文件夹" else "展开子文件夹",
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        } else {
+            Spacer(Modifier.width(32.dp))
+        }
         Icon(
             imageVector = if (node.children.isEmpty()) {
                 Icons.Filled.PhotoLibrary
@@ -372,21 +425,6 @@ private fun FolderRowItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        }
-        // 展开/收起：有子目录才显示箭头；没有子目录也占同样宽的位置，避免行尾按钮左右跳动。
-        if (node.children.isNotEmpty()) {
-            IconButton(onClick = onToggleExpand) {
-                Icon(
-                    imageVector = if (expanded) {
-                        Icons.Filled.KeyboardArrowDown
-                    } else {
-                        Icons.AutoMirrored.Filled.KeyboardArrowRight
-                    },
-                    contentDescription = if (expanded) "收起" else "展开",
-                )
-            }
-        } else {
-            Spacer(Modifier.width(48.dp))
         }
         // 根目录是合成出来的伪节点，没有改名 / 删除 / 置顶的意义，不给菜单入口。
         if (node.path.isNotEmpty()) {

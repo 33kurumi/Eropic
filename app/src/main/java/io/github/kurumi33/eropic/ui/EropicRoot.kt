@@ -270,6 +270,12 @@ fun EropicRoot(viewModel: EropicViewModel) {
                         AppScreen.CleanupReport -> CleanupReportScreen(
                             viewModel = viewModel,
                             onBack = closeScreen,
+                            // 清理 Tab 的索引是 2：从任何入口（清理页、图库更多、设置更多页面）
+                            // 打开报告后点「去清理」都落到同一个页面，而不是回到打开它的地方。
+                            onGoCleanup = {
+                                tabIndex = 2
+                                closeScreen()
+                            },
                         )
                         AppScreen.About -> AboutScreen(viewModel = viewModel, onBack = closeScreen)
                         AppScreen.Trash -> TrashScreen(

@@ -1,178 +1,162 @@
 package io.github.kurumi33.eropic.ui.about
 
-import android.os.Build
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.net.Uri
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.kurumi33.eropic.BuildConfig
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.common.EropicTopBar
 
 /**
- * 关于页（M4 · T5）。
+ * 关于页（v0.6 重做）。
  *
- * 把「这个应用到底碰了你的什么数据」讲清楚：权限、本地文件位置、无网络说明、
- * 依赖许可、崩溃日志。全部只读，不会改动任何图片。
+ * 之前这一页什么都有：逐条权限表、系统与设备、本地数据目录、第三方许可、崩溃日志、设计原则。
+ * 用户反馈「太长、找不到重点」，于是只留四块真正需要知道的：
+ * 我是谁（应用身份）→ 去哪看源码 → 你怎么处理我的数据（隐私协议）→ 都改了什么（更新日志）→ 用了谁的轮子（许可）。
+ *
+ * viewModel 在这个版本里已经用不上了（崩溃日志那块被删掉），但保留参数是为了不动
+ * EropicRoot.kt 里 AboutScreen(viewModel, onBack) 的调用签名。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
-    var crashLog by remember { mutableStateOf(viewModel.latestCrashLog()) }
-    val versionName = remember {
+    // 版本号沿用原来的取法：向系统读自己包的信息，不再额外生成 BuildConfig 字段。
+    val versionName = remember(context) {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "0.1.0"
+        }.getOrNull() ?: "未知"
     }
-    val cacheDir = remember { context.cacheDir.absolutePath }
-    val thumbDir = remember { java.io.File(context.cacheDir, "thumbs").absolutePath }
+    val appIcon = remember(context) { loadAppIcon(context) }
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("关于 Eropic") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
+            // 本页没有副标题，显式传 null（传空串会多占一行，标题看起来偏高）。
+            EropicTopBar(title = "关于", subtitle = null, onBack = onBack)
         },
-    ) { padding ->
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .padding(innerPadding)
                 .verticalScroll(rememberScrollState())
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "Eropic " + versionName, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "个人图片与存储管理工具：本地优先、不上传、不自动删除。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    InfoRow("版本", versionName + "（versionCode " + BuildConfig.VERSION_CODE + "）")
-                    InfoRow("构建时间", formatBuildTime(BuildConfig.BUILD_TIME_MS))
-                    InfoRow("包名", context.packageName)
-                    InfoRow("系统", "Android " + Build.VERSION.RELEASE + "（API " + Build.VERSION.SDK_INT + "）")
-                    InfoRow("设备", Build.MANUFACTURER + " " + Build.MODEL)
-                    InfoRow("开源地址", "github.com/33kurumi/Eropic")
+            IdentityCard(icon = appIcon, versionName = versionName)
+
+            GitHubCard()
+
+            AboutSection(title = "隐私协议") {
+                PrivacyLine("所有照片与索引只存在这台手机上；索引删掉也能重建，不会动你的原图。")
+                PrivacyLine("不上传、无账号、不采集统计，也没有任何第三方 SDK 在打点。")
+                PrivacyLine("只有你主动点「联网识图」时才会联网，并且只把你选中的那一张图发给你选的服务商。")
+                PrivacyLine("「所有文件访问」只用于移动、重命名、复制和回收站，不用于上传或分析。")
+                PrivacyLine("删除只是移入回收站，默认保留 30 天、随时可恢复。")
+                PrivacyLine("卸载应用不会删除你的照片；只有回收站里的文件需要你先恢复或清空。")
+            }
+
+            AboutSection(title = "更新日志") {
+                changelog.forEach { entry ->
+                    ChangelogRow(entry = entry)
                 }
             }
 
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "权限说明", style = MaterialTheme.typography.titleMedium)
-                    Bullet("READ_MEDIA_IMAGES", "读取照片，用于建立索引和显示图库。只读。")
-                    Bullet("READ_MEDIA_VISUAL_USER_SELECTED", "Android 14+ 的「仅选择部分照片」访问。")
-                    Bullet("MANAGE_EXTERNAL_STORAGE", "「所有文件访问」：真实移动、重命名、复制、移入回收站时才需要；未授权时这些按钮置灰。")
-                    Bullet("POST_NOTIFICATIONS", "回收站到期提醒。可拒绝。")
-                    Bullet("INTERNET", "仅「识图 → 联网搜图」使用：把你要搜的那一张图上传到你选的服务。不点它就不会联网。")
-                    Text(
-                        text = "后台补充权限（WAKE_LOCK、FOREGROUND_SERVICE、RECEIVE_BOOT_COMPLETED）由 WorkManager 依赖合并进来，" +
-                            "用于后台补齐缩略图与自动同步。除你在「识图」页主动点「联网搜图」外，Eropic 不会发起任何网络请求，也不会自动上传图片。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+            AboutSection(title = "第三方与许可") {
+                Text(
+                    text = "基于 Kotlin / Jetpack Compose / Room / Paging / Coil / WorkManager / OkHttp / ExifInterface，" +
+                        "均为 Apache 2.0 许可。交互设计参考了 Immich、PhotoPrism、Aves、Fossify Gallery 等开源项目，" +
+                        "但没有复制它们的源码。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "本地数据都放在哪", style = MaterialTheme.typography.titleMedium)
-                    InfoRow("索引数据库", "应用私有目录（Room / SQLite），可随时重建")
-                    InfoRow("缩略图缓存", thumbDir)
-                    InfoRow("缓存根目录", cacheDir)
-                    InfoRow(
-                        "回收站",
-                        "默认在存储卷根目录 /.EropicTrash（带 .nomedia，不会被相册扫描到），" +
-                            "可在「清理 → 回收站」里查看当前路径并更改",
-                    )
-                    Text(
-                        text = "卸载应用会一并删除数据库与缩略图缓存；但 /.EropicTrash 里的文件在卸载前请先恢复或清空，否则会成为普通隐藏文件。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "第三方组件与许可", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "Kotlin、Jetpack Compose、Room、Paging、Coil、WorkManager、ExifInterface —— 均为 Apache 2.0。" +
-                            "本项目的设计参考了 Immich、PhotoPrism、Aves、Fossify Gallery 等开源项目的公开交互与思路，" +
-                            "但未复制其源码（其中部分项目为 AGPL/GPL 许可）。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "崩溃日志", style = MaterialTheme.typography.titleMedium)
-                    if (crashLog.isNullOrBlank()) {
-                        Text(
-                            text = "没有记录到崩溃。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    } else {
-                        Text(text = crashLog.orEmpty(), style = MaterialTheme.typography.bodySmall)
-                        OutlinedButton(onClick = {
-                            viewModel.clearCrashLogs()
-                            crashLog = null
-                        }) { Text("清空日志") }
-                    }
-                    Text(
-                        text = "日志只写在本机应用私有目录，不含图片内容，不会上传。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(text = "设计原则", style = MaterialTheme.typography.titleMedium)
-                    Bullet("只检索，不决策", "重复/相似/大文件只做检索和分组，删不删、留哪张永远由你确认。")
-                    Bullet("可恢复", "删除 = 移入回收站，默认 30 天可恢复；移动/重命名/复制都能在操作历史里撤销。")
-                    Bullet("本地", "没有网络权限，不上传、不联网比对。")
-                    Bullet("可迁移", "索引数据库是缓存，删掉重建即可，你的照片目录结构不会被改写。")
-                }
-            }
-
+            // 原来那整块「设计原则」压成一行：留个态度就够了，不再展开四条。
             Text(
-                text = "Eropic · 用 Kotlin + Jetpack Compose 写的本地工具。",
+                text = "Eropic · 只做检索与整理，删不删永远由你确认。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 身份卡：图标、名字、一句话定位、开发者、版本与构建时间，居中展示。
+ *
+ * 版本号旁边带上构建时间：debug 包每次编译都不同，用户报问题时能直接说清装的是哪一版
+ * （沿用 app/build.gradle.kts 里写好的 BuildConfig.BUILD_TIME_MS）。
+ */
+@Composable
+private fun IdentityCard(icon: ImageBitmap?, versionName: String) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (icon != null) {
+                // 图标是满幅的方形，这里套一层圆角，免得在卡片里显得像一块灰板。
+                Image(
+                    bitmap = icon,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(76.dp)
+                        .clip(RoundedCornerShape(20.dp)),
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+            Text(text = "Eropic", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                text = "个人图片与存储管理工具",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(text = "开发者 33kurumi", style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = "版本 " + versionName + " · 构建 " + formatBuildTime(BuildConfig.BUILD_TIME_MS),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -180,37 +164,159 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
     }
 }
 
-/** 构建时间戳 → 可读的本地时间（debug 包每次构建都不同，方便确认手机上装的是哪一版）。 */
+/**
+ * 开源地址：整行可点，点了用浏览器打开 GitHub。
+ */
+@Composable
+private fun GitHubCard() {
+    val context = LocalContext.current
+    val repoUrl = "https://github.com/33kurumi/Eropic"
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { openUrl(context, repoUrl) }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Code,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(text = "GitHub 源码", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = "github.com/33kurumi/Eropic",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.OpenInNew,
+                contentDescription = "用浏览器打开",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 分组外框，样式对齐设置页的 SettingsSection：
+ * 底色 surfaceContainerLow、无阴影，标题在框内顶部，下面一条分隔线。
+ */
+@Composable
+private fun AboutSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            HorizontalDivider()
+            content()
+        }
+    }
+}
+
+/**
+ * 隐私协议的一条：前面一个点，正文自动换行。
+ */
+@Composable
+private fun PrivacyLine(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = "·",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * 更新日志的一行：左边版本号（等宽、加粗、主题色），右边一句话说明。
+ */
+@Composable
+private fun ChangelogRow(entry: ChangelogEntry) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = entry.version,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.width(34.dp),
+        )
+        Text(
+            text = entry.summary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** 构建时间戳 → 可读的本地时间；构建脚本没写值时就留空。 */
 private fun formatBuildTime(ms: Long): String {
     if (ms <= 0L) return "未知"
     return java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA)
         .format(java.util.Date(ms))
 }
 
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(text = value, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-    }
+/** 用系统自带浏览器打开链接；没有可用浏览器时静默失败（不弹警告打断阅读）。 */
+private fun openUrl(context: Context, url: String) {
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
 }
 
-@Composable
-private fun Bullet(title: String, body: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(text = "· " + title, style = MaterialTheme.typography.bodyMedium)
-        Text(
-            text = body,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
+/**
+ * 取应用图标并画成位图。
+ *
+ * 为什么不用 painterResource(R.mipmap.ic_launcher)：清单里的 ic_launcher 是 adaptive-icon 的 XML，
+ * painterResource 只认矢量和位图，碰到自适应图标解不出来（空白或直接抛异常）。
+ * 这里改成向 PackageManager 要系统已经算好的图标 Drawable，再画进一张位图，各版本都稳。
+ */
+private fun loadAppIcon(context: Context): ImageBitmap? {
+    return runCatching {
+        val drawable = context.packageManager.getApplicationIcon(context.packageName)
+        // 192px 够显示 76dp（按 2 倍多算），也不会为了一个图标占太多内存。
+        val size = 192
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(canvas)
+        bitmap.asImageBitmap()
+    }.getOrNull()
 }

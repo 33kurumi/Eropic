@@ -111,16 +111,17 @@ class SearchCoreTest {
     }
 
     @Test
-    fun reverseImageProvider_keepsSixDistinctHttpsHomes() {
+    fun reverseImageProvider_keepsFiveDistinctHttpsHomes() {
         val providers = ReverseImageProvider.entries
-        assertEquals(6, providers.size)
+        assertEquals(5, providers.size)
         // v0.5 起对齐 kitUIN/PicImageSearch：whos.tv 下线（需要账号+积分且被 Cloudflare 拦），
-        // 补上实现简单的 IQDB。枚举顺序即 UI 上的按钮顺序。
+        // 补上实现简单的 IQDB。v0.6 再去掉 Yandex（结果页依赖服务端 302，稳定性差且同样要代理）。
+        // 枚举顺序即 UI 上的按钮顺序。
         assertEquals(
-            listOf("GOOGLE_LENS", "YANDEX", "BAIDU", "SAUCENAO", "ASCII2D", "IQDB"),
+            listOf("GOOGLE_LENS", "BAIDU", "SAUCENAO", "ASCII2D", "IQDB"),
             providers.map { it.name },
         )
-        assertEquals(6, providers.map { it.label }.distinct().size)
+        assertEquals(5, providers.map { it.label }.distinct().size)
         providers.forEach { provider ->
             assertTrue(
                 "provider " + provider.name + " 的 homeUrl 必须是 https 地址",
@@ -130,52 +131,35 @@ class SearchCoreTest {
         }
     }
 
-    // ---------- Yandex 响应解析 ----------
+    // ---------- 百度识图响应解析（v0.6） ----------
 
     @Test
-    fun yandexResultUrl_prefersCbirIdUrlOverThumbnail() {
+    fun baiduResultUrl_picksGraphBaiduLink() {
         val body = """
-            {"blocks":[{"params":{"url":"https://avatars.mds.yandex.net/thumb.jpg"}},
-                       {"params":{"url":"?rpt=imageview&cbir_id=abc123&cbir_page=similar"}}]}
+            {"status":0,"msg":"Success","data":{"url":"https://graph.baidu.com/s?card_key=&sign=1","thumb":"https://x.test/t.jpg"}}
         """.trimIndent()
-        assertEquals(
-            "https://yandex.com/images/search?rpt=imageview&cbir_id=abc123&cbir_page=similar",
-            ReverseSearchParsers.yandexResultUrl(body),
-        )
+        assertEquals("https://graph.baidu.com/s?card_key=&sign=1", ReverseSearchParsers.baiduResultUrl(body))
     }
 
     @Test
-    fun yandexResultUrl_acceptsAbsoluteUrl() {
-        val body = """{"url":"https://yandex.com/images/search?rpt=imageview&cbir_id=xyz"}"""
-        assertEquals(
-            "https://yandex.com/images/search?rpt=imageview&cbir_id=xyz",
-            ReverseSearchParsers.yandexResultUrl(body),
-        )
+    fun baiduResultUrl_unescapesJsonSlashes() {
+        val body = """{"status":0,"data":{"url":"https:\/\/graph.baidu.com\/s?sign=abc"}}"""
+        assertEquals("https://graph.baidu.com/s?sign=abc", ReverseSearchParsers.baiduResultUrl(body))
     }
 
     @Test
-    fun yandexResultUrl_fallsBackToCbirId() {
-        val body = """{"blocks":[{"params":{}}],"cbir_id":"deadbeef"}"""
-        assertEquals(
-            "https://yandex.com/images/search?rpt=imageview&cbir_id=deadbeef",
-            ReverseSearchParsers.yandexResultUrl(body),
-        )
+    fun baiduResultUrl_returnsNullForRejection() {
+        // 实测缺 Acs-Token 头时的真实响应，不能从中抠出链接
+        assertNull(ReverseSearchParsers.baiduResultUrl("""{"status":1,"msg":"Reject","data":null}"""))
+        assertNull(ReverseSearchParsers.baiduResultUrl("<html>502 Bad Gateway</html>"))
     }
 
     @Test
-    fun yandexResultUrl_returnsNullForGarbage() {
-        assertNull(ReverseSearchParsers.yandexResultUrl(""))
-        assertNull(ReverseSearchParsers.yandexResultUrl("<html>502 Bad Gateway</html>"))
-    }
-
-    @Test
-    fun yandexResultUrl_unescapesJsonSlashes() {
-        // 服务端有时把 / 转义成 \/，拼出来的链接不能带反斜杠
-        val body = """{"url":"https:\/\/yandex.com\/images\/search?rpt=imageview&cbir_id=a1"}"""
-        assertEquals(
-            "https://yandex.com/images/search?rpt=imageview&cbir_id=a1",
-            ReverseSearchParsers.yandexResultUrl(body),
-        )
+    fun baiduStatus_readsTopLevelStatus() {
+        assertEquals(0, ReverseSearchParsers.baiduStatus("""{"status":0,"msg":"Success"}"""))
+        assertEquals(1, ReverseSearchParsers.baiduStatus("""{"status":1,"msg":"Reject"}"""))
+        assertEquals(1002, ReverseSearchParsers.baiduStatus("""{"status":1002,"msg":"Params illegal"}"""))
+        assertNull(ReverseSearchParsers.baiduStatus("<html>502 Bad Gateway</html>"))
     }
 
     // ---------- Google Lens 响应解析（v0.5 起按 PicImageSearch 的 udm 分类链接） ----------
@@ -307,10 +291,14 @@ class SearchCoreTest {
     // ---------- 提示文案 ----------
 
     @Test
-    fun sauceNaoMissingKeyMessage_pointsToSettings() {
-        assertTrue(SAUCE_NAO_NO_KEY_MESSAGE.contains("设置"))
-        assertTrue(SAUCE_NAO_NO_KEY_MESSAGE.contains("联网识图"))
-        assertTrue(SAUCE_NAO_NO_KEY_MESSAGE.contains("SauceNAO API Key"))
+    fun baiduMessages_explainFailureWithoutAskingForCookie() {
+        // 用户曾怀疑百度要加 Cookie；这里锁住提示口径：不再教用户配 Cookie 或填 key
+        assertTrue(baiduStatusMessage(1).contains("稍后再试"))
+        assertTrue(baiduStatusMessage(1002).contains("换一张"))
+        assertTrue(baiduStatusMessage(-9).contains("-9"))
+        assertTrue(baiduHttpMessage(413).contains("图片太大"))
+        assertTrue(baiduHttpMessage(429).contains("频繁"))
+        assertTrue(baiduHttpMessage(503).contains("503"))
     }
 
     @Test
@@ -324,7 +312,9 @@ class SearchCoreTest {
 
     @Test
     fun sauceNaoHttpMessage_mapsCommonCodes() {
-        assertTrue(sauceNaoHttpMessage(403).contains("API Key"))
+        // v0.6：key 内置进代码，提示里不该再让用户"去设置里填 key"
+        assertTrue(sauceNaoHttpMessage(403).contains("key"))
+        assertTrue(!sauceNaoHttpMessage(403).contains("设置"))
         assertTrue(sauceNaoHttpMessage(413).contains("图片"))
         assertTrue(sauceNaoHttpMessage(429).contains("频繁"))
         assertTrue(sauceNaoHttpMessage(503).contains("503"))

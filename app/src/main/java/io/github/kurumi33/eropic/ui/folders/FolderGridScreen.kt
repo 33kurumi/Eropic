@@ -20,7 +20,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -49,6 +53,8 @@ import io.github.kurumi33.eropic.core.folders.findFolderNode
 import io.github.kurumi33.eropic.core.folders.folderStatsOf
 import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.core.media.SortOrder
+import io.github.kurumi33.eropic.core.settings.AppSettings
+import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
@@ -56,6 +62,13 @@ import io.github.kurumi33.eropic.ui.common.formatCount
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.File
+
+/**
+ * 网格列数范围（v0.6 由 3..6 放开到 2..8）。
+ * 直接引用 AppSettings 常量，与设置页、SettingsRepository 的钳制保持同一来源。
+ */
+private const val GRID_COLUMNS_MIN = AppSettings.MIN_GRID_COLUMNS
+private const val GRID_COLUMNS_MAX = AppSettings.MAX_GRID_COLUMNS
 
 /**
  * 网格模式：只展示当前这一层的子文件夹（不做图片网格）。
@@ -114,6 +127,27 @@ internal fun FolderGridScreen(
                 formatCount(stats.count) + " 张",
             onBack = if (path.isNotEmpty()) onUp else null,
             actions = {
+                // 搜索入口：与列表模式一致，直接打开搜索页。
+                IconButton(onClick = { viewModel.openScreen(AppScreen.Search) }) {
+                    Icon(
+                        imageVector = Icons.Filled.Search,
+                        contentDescription = "搜索图片",
+                    )
+                }
+                // 列数缩放：范围与设置页、SettingsRepository 同源（AppSettings 2..8），
+                // 到边界就禁用按钮，避免点了没反应。
+                CompactIconButton(
+                    imageVector = Icons.Filled.Remove,
+                    contentDescription = "减少每行图片列数",
+                    enabled = settings.gridColumns > GRID_COLUMNS_MIN,
+                    onClick = { viewModel.setGridColumns(settings.gridColumns - 1) },
+                )
+                CompactIconButton(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = "增加每行图片列数",
+                    enabled = settings.gridColumns < GRID_COLUMNS_MAX,
+                    onClick = { viewModel.setGridColumns(settings.gridColumns + 1) },
+                )
                 FolderPageMenu(
                     activeSort = activeSort,
                     onSortSelected = onSortSelected,
@@ -160,6 +194,37 @@ internal fun FolderGridScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * 顶栏上的小号图标按钮（列数加减用）。
+ *
+ * 默认 IconButton 占 48dp，网格页顶栏同时有搜索 / 减 / 加 / 三点菜单 / 切列表五个动作，
+ * 用 32dp 的小按钮能把空间留给标题和副标题。
+ */
+@Composable
+private fun CompactIconButton(
+    imageVector: ImageVector,
+    contentDescription: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = imageVector,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                alpha = if (enabled) 1f else 0.38f,
+            ),
+        )
     }
 }
 
@@ -322,14 +387,14 @@ private fun EmptySubfolders(
 }
 
 /** 一张文件夹封面的加载结果：id 用于兜底直接读原图，file 是命中缩略图缓存时的本地文件。 */
-private data class FolderCover(val id: Long, val file: File?)
+internal data class FolderCover(val id: Long, val file: File?)
 
 /**
  * 文件夹封面加载器：限制同时查库 / 生成缩略图的并发（[Semaphore] 3），
  * 并把结果（包括「没有封面」的 null）按目录路径缓存，滚动来回不会重复查。
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-private class FolderCoverLoader(
+internal class FolderCoverLoader(
     private val loadCover: suspend (String) -> MediaEntity?,
     private val loadThumb: suspend (MediaEntity) -> File?,
 ) {
@@ -354,7 +419,7 @@ private class FolderCoverLoader(
 }
 
 /** 目录下最新一张图片的 LIKE 前缀模式（目录路径已带结尾斜杠）。 */
-private fun coverPatternOf(path: String): String = escapeLike(path) + "%"
+internal fun coverPatternOf(path: String): String = escapeLike(path) + "%"
 
 /** 转义 LIKE 通配符：先转义反斜杠本身，再转义 % 和 _。 */
 private fun escapeLike(raw: String): String =

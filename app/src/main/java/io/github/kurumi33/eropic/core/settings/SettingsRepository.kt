@@ -33,7 +33,6 @@ class SettingsRepository(private val context: Context) {
         val SIMILARITY = stringPreferencesKey("similarity")
         val SCAN_INCLUDE_HIDDEN = booleanPreferencesKey("scan_include_hidden")
         val SCAN_EXCLUDED_DIRS = stringPreferencesKey("scan_excluded_dirs")
-        val SAUCE_NAO_API_KEY = stringPreferencesKey("sauce_nao_api_key")
         val PINNED_FOLDERS = stringPreferencesKey("pinned_folders")
         val FOLDER_COVERS = stringPreferencesKey("folder_covers")
     }
@@ -44,7 +43,8 @@ class SettingsRepository(private val context: Context) {
             themeMode = prefs[Keys.THEME_MODE]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                 ?: defaults.themeMode,
             dynamicColor = prefs[Keys.DYNAMIC_COLOR] ?: defaults.dynamicColor,
-            gridColumns = (prefs[Keys.GRID_COLUMNS] ?: defaults.gridColumns).coerceIn(3, 6),
+            gridColumns = (prefs[Keys.GRID_COLUMNS] ?: defaults.gridColumns)
+                .coerceIn(AppSettings.MIN_GRID_COLUMNS, AppSettings.MAX_GRID_COLUMNS),
             showMeta = prefs[Keys.SHOW_META] ?: defaults.showMeta,
             defaultSort = prefs[Keys.DEFAULT_SORT]?.let { runCatching { SortOrder.valueOf(it) }.getOrNull() }
                 ?: defaults.defaultSort,
@@ -61,7 +61,6 @@ class SettingsRepository(private val context: Context) {
             similarity = SimilarityLevel.fromName(prefs[Keys.SIMILARITY]),
             scanIncludeHidden = prefs[Keys.SCAN_INCLUDE_HIDDEN] ?: defaults.scanIncludeHidden,
             scanExcludedDirs = parseDirs(prefs[Keys.SCAN_EXCLUDED_DIRS]),
-            sauceNaoApiKey = prefs[Keys.SAUCE_NAO_API_KEY] ?: defaults.sauceNaoApiKey,
             pinnedFolders = parsePinned(prefs[Keys.PINNED_FOLDERS]),
             folderCovers = parseCovers(prefs[Keys.FOLDER_COVERS]),
         )
@@ -74,7 +73,9 @@ class SettingsRepository(private val context: Context) {
     suspend fun setDynamicColor(enabled: Boolean) = context.settingsDataStore.edit { it[Keys.DYNAMIC_COLOR] = enabled }
 
     suspend fun setGridColumns(columns: Int) =
-        context.settingsDataStore.edit { it[Keys.GRID_COLUMNS] = columns.coerceIn(3, 6) }
+        context.settingsDataStore.edit {
+            it[Keys.GRID_COLUMNS] = columns.coerceIn(AppSettings.MIN_GRID_COLUMNS, AppSettings.MAX_GRID_COLUMNS)
+        }
 
     suspend fun setShowMeta(enabled: Boolean) = context.settingsDataStore.edit { it[Keys.SHOW_META] = enabled }
 
@@ -119,10 +120,6 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setSimilarity(level: SimilarityLevel) =
         context.settingsDataStore.edit { it[Keys.SIMILARITY] = level.name }
-
-    /** v0.3：SauceNAO API Key（去掉首尾空白；空串表示未配置）。 */
-    suspend fun setSauceNaoApiKey(raw: String) =
-        context.settingsDataStore.edit { it[Keys.SAUCE_NAO_API_KEY] = raw.trim() }
 
     /** v0.5：置顶 / 取消置顶一个文件夹。路径会在入库前统一去掉首尾斜杠。 */
     suspend fun setFolderPinned(relativePath: String, pinned: Boolean) {

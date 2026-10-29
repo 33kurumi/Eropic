@@ -44,7 +44,12 @@ data class MediaFilter(
     /** 清晰度区间，列 blurScore（拉普拉斯方差，越大越清晰）；null 表示未计算，不会被区间命中。 */
     val minBlurScore: Float? = null,
     val maxBlurScore: Float? = null,
-    /** 文件名 / 目录模糊搜索（对应规划 A-11），不区分大小写，% 与 _ 会转义。 */
+    /**
+     * 文件名 / 目录关键词（对应规划 A-11），不区分大小写，% 与 _ 会转义。
+     *
+     * 支持多词语法（空格 AND、双引号短语、- 排除、| 或），解析见 [SearchText]。
+     * 这里存的是用户输入的**原文**，保存筛选条件时也存原文，改语法不用迁移老数据。
+     */
     val nameLike: String? = null,
 ) {
 
@@ -165,12 +170,28 @@ object MediaFilterSql {
             clauses += "blurScore <= ?"
             args += it
         }
+        // 文件名 / 目录关键词：按 SearchText 解析成「AND 的多组、组内 OR、可排除」，
+        // 图库搜索、文件夹搜索、识图关键词共用同一份语义（v0.6）。
         filter.nameLike?.takeIf { it.isNotBlank() }?.let { raw ->
-            // 文件名与目录都参与匹配：用户往往记得"在哪个文件夹"而不记得文件名本身
-            val pattern = "%" + escapeLike(raw.trim()) + "%"
-            clauses += "(displayName LIKE ?" + LIKE_ESCAPE + " OR relativePath LIKE ?" + LIKE_ESCAPE + ")"
-            args += pattern
-            args += pattern
+            val parsed = SearchText.parse(raw)
+            for (group in parsed.groups) {
+                // 文件名与目录都参与匹配：用户往往记得"在哪个文件夹"而不记得文件名本身
+                val parts = group.map { word ->
+                    val pattern = "%" + escapeLike(word) + "%"
+                    args += pattern
+                    args += pattern
+                    "(displayName LIKE ?" + LIKE_ESCAPE + " OR relativePath LIKE ?" + LIKE_ESCAPE + ")"
+                }
+                clauses += "(" + parts.joinToString(" OR ") + ")"
+            }
+            for (excluded in parsed.excludes) {
+                val pattern = "%" + escapeLike(excluded) + "%"
+                args += pattern
+                args += pattern
+                // 排除：文件名与目录都不含该词才算命中
+                clauses += "(displayName NOT LIKE ?" + LIKE_ESCAPE +
+                    " AND relativePath NOT LIKE ?" + LIKE_ESCAPE + ")"
+            }
         }
         return clauses.joinToString(" AND ") to args
     }

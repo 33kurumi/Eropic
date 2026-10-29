@@ -1,6 +1,5 @@
 package io.github.kurumi33.eropic.ui.settings
 
-import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -10,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -44,8 +45,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -97,7 +96,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         // v0.5：统一顶栏；副标题带上版本号，用户反馈问题时能直接说明用的哪一版。
-        EropicTopBar(title = "设置", subtitle = "v0.5")
+        EropicTopBar(title = "设置", subtitle = "v0.6")
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -106,7 +105,8 @@ fun SettingsScreen(viewModel: EropicViewModel) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             // v0.4：每个功能组一个外框（SettingsSection），组里的行直接排在框内，不再叠一层卡片。
-            // 顺序：外观 → 图库与查看 → 清理与回收站 → 资源与缓存 → 后台与电量 → 存储权限 → 联网识图 → 更多页面 → 关于。
+            // 顺序：外观 → 图库与查看 → 清理与回收站 → 资源与缓存 → 后台与电量 → 存储权限 → 更多页面 → 关于。
+            // v0.6：删掉「联网识图」（Key 已内置进代码、识图入口在底部/清理页），也删掉与关于页重复的入口。
             SettingsSection(
                 title = "外观",
                 subtitle = "主题与取色。",
@@ -176,13 +176,6 @@ fun SettingsScreen(viewModel: EropicViewModel) {
             }
 
             SettingsSection(
-                title = "联网识图",
-                subtitle = "用浏览器以图搜图；SauceNAO 需要 API Key；除百度识图外都需要代理。识图结果由对应网站返回，图片会上传到该网站。",
-            ) {
-                OnlineImageSearchCard(settings = settings, viewModel = viewModel)
-            }
-
-            SettingsSection(
                 title = "更多页面",
                 subtitle = "底部栏放不下的二级页面。",
             ) {
@@ -191,7 +184,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
             SettingsSection(
                 title = "关于",
-                subtitle = "版本、开源地址与数据说明。",
+                subtitle = "版本、隐私协议、更新日志与许可。",
             ) {
                 Text(text = "Eropic " + versionName + " · 本地优先 · 仅「联网搜图」时联网")
                 Text(
@@ -205,7 +198,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedButton(onClick = { viewModel.openScreen(AppScreen.About) }) {
-                    Text("权限、数据与许可详情")
+                    Text("关于 Eropic")
                 }
             }
         }
@@ -274,86 +267,6 @@ private fun SettingsSection(
             HorizontalDivider()
             content()
         }
-    }
-}
-
-/**
- * 联网识图：只留 SauceNAO 的 API Key。
- *
- * v0.5 起界面照 PicImageSearch 的 6 家协议：只有 SauceNAO 强制要 key（免费注册后拿到），
- * Google Lens / Yandex / 百度识图 / ascii2d / IQDB 都能匿名直接传图。key 只存在本机 DataStore，不经过网络。
- */
-@Composable
-private fun OnlineImageSearchCard(settings: AppSettings, viewModel: EropicViewModel) {
-    val context = LocalContext.current
-    var showKey by remember { mutableStateOf(false) }
-    // 草稿随已保存的 key 同步：保存成功后 settings 变化，输入框会换成新值。
-    var keyDraft by remember(settings.sauceNaoApiKey) { mutableStateOf(settings.sauceNaoApiKey) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = "SauceNAO 的接口需要免费的 API Key（在 saucenao.com 注册后获取）。" +
-                "不填也能用 Google Lens / Yandex / 百度识图 / ascii2d / IQDB；除百度识图外都需要代理。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        OutlinedTextField(
-            value = keyDraft,
-            onValueChange = { keyDraft = it },
-            label = { Text("SauceNAO API Key") },
-            placeholder = { Text("粘贴 saucenao.com 给你的 key") },
-            singleLine = true,
-            visualTransformation = if (showKey) {
-                VisualTransformation.None
-            } else {
-                PasswordVisualTransformation()
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Button(
-                onClick = { viewModel.setSauceNaoApiKey(keyDraft) },
-                enabled = keyDraft.trim() != settings.sauceNaoApiKey,
-            ) { Text("保存") }
-            TextButton(onClick = { showKey = !showKey }) {
-                Text(if (showKey) "隐藏 Key" else "显示 Key")
-            }
-        }
-
-        // 文字按钮：直接跳到 SauceNAO 主页去注册/登录拿 key。
-        TextButton(
-            onClick = {
-                runCatching {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("https://saucenao.com/")),
-                    )
-                }
-            },
-        ) { Text("打开 saucenao.com") }
-
-        Text(
-            text = if (settings.sauceNaoApiKey.isEmpty()) {
-                "当前未配置 SauceNAO Key。"
-            } else {
-                "当前已配置（" + settings.sauceNaoApiKey.length + " 个字符）。"
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (keyDraft.trim() != settings.sauceNaoApiKey) {
-            Text(
-                text = "有未保存的修改。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.tertiary,
-            )
-        }
-
     }
 }
 
@@ -530,13 +443,18 @@ private fun SettingSwitchRow(
 /**
  * 图库与查看分组：网格列数、标题栏元信息、默认排序、日期分组、幻灯片间隔。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun GalleryViewCard(settings: AppSettings, viewModel: EropicViewModel) {
     var sortMenuOpen by remember { mutableStateOf(false) }
 
     Text(text = "每行显示", style = MaterialTheme.typography.labelLarge)
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        (3..6).forEach { columns ->
+    // v0.6 起列数范围 2..8（7 档），用 FlowRow 自动换行，窄屏也不会挤出边界。
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        (AppSettings.MIN_GRID_COLUMNS..AppSettings.MAX_GRID_COLUMNS).forEach { columns ->
             FilterChip(
                 selected = settings.gridColumns == columns,
                 onClick = { viewModel.setGridColumns(columns) },
@@ -732,10 +650,6 @@ private fun ScanScopeCard(settings: AppSettings, viewModel: EropicViewModel) {
 private fun MorePagesCard(viewModel: EropicViewModel) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(
-            onClick = { viewModel.openScreen(AppScreen.Search) },
-            modifier = Modifier.weight(1f),
-        ) { Text("搜索") }
-        OutlinedButton(
             onClick = { viewModel.openScreen(AppScreen.Storage) },
             modifier = Modifier.weight(1f),
         ) { Text("存储总览") }
@@ -755,16 +669,6 @@ private fun MorePagesCard(viewModel: EropicViewModel) {
             onClick = { viewModel.openScreen(AppScreen.CleanupReport) },
             modifier = Modifier.weight(1f),
         ) { Text("清理报告") }
-        OutlinedButton(
-            onClick = { viewModel.openScreen(AppScreen.ImageFind) },
-            modifier = Modifier.weight(1f),
-        ) { Text("识图") }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(
-            onClick = { viewModel.openScreen(AppScreen.About) },
-            modifier = Modifier.weight(1f),
-        ) { Text("关于") }
     }
 }
 

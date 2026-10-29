@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
+import io.github.kurumi33.eropic.core.folders.FolderNode
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.EropicTopBar
@@ -51,6 +52,10 @@ import kotlinx.coroutines.launch
  *   进入后本页自己记住，不再跟随外层。
  * @param initialSort 外层选择的排序（null = 沿用图库排序），同样只作为初始值。
  * @param initialSelectionActive 从弹层「选择」进入时直接处于多选模式。
+ * @param subfolders 本目录的直接子目录（由列表页从目录树直接传过来，不再查库），
+ *   用于在图片网格上方渲染「子文件夹」横条；没有子目录时整条不渲染。
+ * @param onOpenSubfolder 点横条里的子目录：外层负责把这一层压栈，返回键逐层回退。
+ * @param refreshToken 索引刷新标记，变化时子文件夹封面会重新取（列表页传索引完成时间）。
  */
 @Composable
 fun FolderDetailScreen(
@@ -63,6 +68,9 @@ fun FolderDetailScreen(
     initialIncludeSubfolders: Boolean = false,
     initialSort: SortOrder? = null,
     initialSelectionActive: Boolean = false,
+    subfolders: List<FolderNode> = emptyList(),
+    onOpenSubfolder: (String) -> Unit = {},
+    refreshToken: Long = 0L,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -158,6 +166,16 @@ fun FolderDetailScreen(
                     selectedIds = emptySet()
                 },
             )
+            // 本目录的直接子目录横条：继续往下走一层不用退回列表页。
+            // 多选模式下不渲染，避免误触（此时页面顶部是多选顶栏）。
+            SubfolderStrip(
+                subfolders = subfolders,
+                viewModel = viewModel,
+                refreshToken = refreshToken,
+                thumbnailsEnabled = settings.thumbnailCacheEnabled,
+                folderCovers = settings.folderCovers,
+                onOpenSubfolder = onOpenSubfolder,
+            )
         }
 
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -209,10 +227,13 @@ fun FolderDetailScreen(
 
                 else -> EmptyFolderContent(
                     title = "这个文件夹下没有照片",
-                    hint = if (folderPath.isNotEmpty() && !effectiveIncludeSubfolders && !includeSubfolders) {
-                        "打开上方「包含子文件夹」可以一起看所有子文件夹里的照片。"
-                    } else {
-                        "换个文件夹，或到图库页重新建立索引。"
+                    hint = when {
+                        // 子目录里有图但本层没有：直接指路到子文件夹横条。
+                        subfolders.isNotEmpty() && !effectiveIncludeSubfolders ->
+                            "点上方「子文件夹」里的一项进去看看，或打开「包含子文件夹」。"
+                        folderPath.isNotEmpty() && !effectiveIncludeSubfolders && !includeSubfolders ->
+                            "打开上方「包含子文件夹」可以一起看所有子文件夹里的照片。"
+                        else -> "换个文件夹，或到图库页重新建立索引。"
                     },
                 )
             }

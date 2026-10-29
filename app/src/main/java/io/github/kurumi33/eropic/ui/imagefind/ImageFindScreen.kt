@@ -42,7 +42,6 @@ import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.SearchOff
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -109,15 +108,15 @@ private const val MIN_FIND_COLUMNS = 2
 private const val MAX_FIND_COLUMNS = 8
 
 /**
- * 联网识图固定这 6 家（顺序即按钮顺序）：Google Lens / Yandex / 百度识图 / SauceNAO / ascii2d / IQDB。
+ * 联网识图固定这 5 家（顺序即按钮顺序）：Google Lens / 百度识图 / SauceNAO / ascii2d / IQDB。
  *
- * v0.5 起上传协议照抄 kitUIN/PicImageSearch，六家都满足「匿名 multipart 上传本地图片」；
- * 百度识图是国内唯一能直连的一家，放在第三位当兜底，IQDB 是二次元图库检索放最后。
+ * v0.5 起上传协议照抄 kitUIN/PicImageSearch，这 5 家都满足「匿名 multipart 上传本地图片」；
+ * v0.6 去掉了 Yandex（结果页依赖服务端 302，稳定性差，且国内同样要代理）。
+ * 百度识图是国内唯一能直连的一家，放在第二位当兜底，IQDB 是二次元图库检索放最后。
  * 这里显式列出来而不是用 ReverseImageProvider.entries，方便以后枚举里再增删而不影响界面顺序。
  */
 private val ONLINE_PROVIDERS: List<ReverseImageProvider> = listOf(
     ReverseImageProvider.GOOGLE_LENS,
-    ReverseImageProvider.YANDEX,
     ReverseImageProvider.BAIDU,
     ReverseImageProvider.SAUCENAO,
     ReverseImageProvider.ASCII2D,
@@ -191,7 +190,6 @@ fun ImageFindScreen(
     var onlineLoading by remember { mutableStateOf<ReverseImageProvider?>(null) }
     var onlineNotice by remember { mutableStateOf<OnlineNotice?>(null) }
     var showCandidates by remember { mutableStateOf(false) }
-    var showSauceNaoDialog by remember { mutableStateOf(false) }
     // 0 = 本地识图，1 = 联网识图。
     var selectedTab by remember { mutableStateOf(0) }
     // 双指捏合临时改的列数：只影响本次浏览，不回写设置，离开页面就恢复。
@@ -274,11 +272,6 @@ fun ImageFindScreen(
             viewModel.postMessage("请先选择一张源图")
             return
         }
-        // SauceNAO 需要 API Key：没配置时直接引导去设置/官网，而不是等上传失败再报「暂未支持」。
-        if (provider == ReverseImageProvider.SAUCENAO && !viewModel.sauceNaoApiKeyConfigured()) {
-            showSauceNaoDialog = true
-            return
-        }
         onlineLoading = provider
         onlineNotice = null
         scope.launch {
@@ -307,7 +300,7 @@ fun ImageFindScreen(
         }
     }
 
-    // 上传失败或没配置 Key 时的兜底：直接在浏览器打开服务商官网手动传图。
+    // 上传失败时的兜底：直接在浏览器打开服务商官网手动传图。
     fun openProviderHome(provider: ReverseImageProvider) {
         if (!openInBrowser(context, provider.homeUrl)) {
             viewModel.postMessage("没有可以打开该链接的浏览器")
@@ -406,24 +399,12 @@ fun ImageFindScreen(
                         modifier = Modifier.weight(1f),
                         onlineLoading = onlineLoading,
                         notice = onlineNotice,
-                        sauceNaoConfigured = viewModel.sauceNaoApiKeyConfigured(),
                         onSearch = { provider -> launchOnlineSearch(provider) },
                         onOpenHome = { provider -> openProviderHome(provider) },
                     )
                 }
             }
         }
-    }
-
-    // SauceNAO 没有配置 Key 时的说明框：给出注册官网入口，而不是让人去猜。
-    if (showSauceNaoDialog) {
-        SauceNaoKeyDialog(
-            onDismiss = { showSauceNaoDialog = false },
-            onOpenHome = {
-                showSauceNaoDialog = false
-                openInBrowser(context, ReverseImageProvider.SAUCENAO.homeUrl)
-            },
-        )
     }
 }
 
@@ -463,10 +444,9 @@ private fun LocalFindTab(
             keyboardActions = KeyboardActions(onSearch = { onKeywordSubmit() }),
         )
 
-        // 与 core/search 里 KeywordSyntax 的解析保持一致：空格 = AND、竖线 = OR、前缀 - = 排除，
-        // 不区分大小写按子串匹配，% 与 _ 都是普通字符。
+        // v0.6 关键词语法：空格 = 同时包含、双引号 = 整段连在一起、词前减号 = 排除（与 core/search 的 KeywordSyntax 对齐）。
         Text(
-            text = "语法：空格分隔多个关键词＝同时满足（AND）· 竖线 | 表示或者（例：猫|狗）· 前缀 - 表示排除（例：-截图）· 不区分大小写 · 按子串匹配，输入 cat 会命中 vacation.jpg · % 和 _ 按普通字符处理",
+            text = "语法：空格分隔多个关键词＝同时包含 · 双引号包住的部分＝整段连在一起（例：\"2024 春节\"）· 词前减号＝排除（例：-截图）· 不区分大小写，按子串匹配",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp),
@@ -673,13 +653,12 @@ private fun SourceSummary(
 /** 联网识图最近一次的结果提示：成功用主色，失败用错误色。 */
 private data class OnlineNotice(val ok: Boolean, val text: String)
 
-/** 「联网识图」Tab：6 个服务商按钮 + 最近一次结果提示；整块独立滚动。 */
+/** 「联网识图」Tab：5 个服务商按钮 + 最近一次结果提示；整块独立滚动。 */
 @Composable
 private fun OnlineFindTab(
     modifier: Modifier = Modifier,
     onlineLoading: ReverseImageProvider?,
     notice: OnlineNotice?,
-    sauceNaoConfigured: Boolean,
     onSearch: (ReverseImageProvider) -> Unit,
     onOpenHome: (ReverseImageProvider) -> Unit,
 ) {
@@ -748,14 +727,13 @@ private fun OnlineFindTab(
                 enabled = onlineLoading == null,
                 loading = onlineLoading == provider,
                 hint = providerHint(provider),
-                setupLabel = providerSetupLabel(provider, sauceNaoConfigured),
                 onSearch = { onSearch(provider) },
                 onOpenHome = { onOpenHome(provider) },
             )
         }
 
         Text(
-            text = "识别不出结果时，可以点「官网」手动上传原图再试。SauceNAO 建议先在「设置 → 联网识图」填 API Key（不填会提示先配置）；除百度识图外，其余服务商通常都需要代理。",
+            text = "识别不出结果时，可以点「官网」手动上传原图再试。除百度识图外，其余服务商通常都需要代理。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 14.dp),
@@ -764,25 +742,17 @@ private fun OnlineFindTab(
 }
 
 /**
- * 每个服务商的一句话说明：v0.5 只讲「要不要代理 / 能不能填 Key」，
- * 端点与表单字段的实现细节留在 core/search/OnlineImageSearch 里。
+ * 每个服务商的一句话说明：只讲「要不要代理」，端点与表单字段的实现细节留在 core/search/OnlineImageSearch 里。
+ *
+ * v0.6 起 SauceNAO 的 API Key 已内置在 AppSettings 默认值里，界面上不再有「填 Key」这类提示，
+ * 所以这里只剩代理说明，when 也只覆盖剩下的 5 家。
  */
 private fun providerHint(provider: ReverseImageProvider): String = when (provider) {
     ReverseImageProvider.GOOGLE_LENS -> "海外，需要代理"
-    ReverseImageProvider.YANDEX -> "海外，需要代理"
     ReverseImageProvider.BAIDU -> "国内可直连"
-    ReverseImageProvider.SAUCENAO -> "海外，需要代理；可填 API Key 提高配额"
+    ReverseImageProvider.SAUCENAO -> "海外，需要代理"
     ReverseImageProvider.ASCII2D -> "海外，需要代理"
     ReverseImageProvider.IQDB -> "海外，需要代理"
-}
-
-/** 需要先去设置里补配置时，按钮上显示的动作文案；null 表示条件已就绪，可以直接识图。 */
-private fun providerSetupLabel(
-    provider: ReverseImageProvider,
-    sauceNaoConfigured: Boolean,
-): String? = when {
-    provider == ReverseImageProvider.SAUCENAO && !sauceNaoConfigured -> "填 Key"
-    else -> null
 }
 
 /** 单个服务商：名称 + 状态说明 + 「官网」兜底入口 + 识图按钮。 */
@@ -792,7 +762,6 @@ private fun ProviderRow(
     enabled: Boolean,
     loading: Boolean,
     hint: String,
-    setupLabel: String?,
     onSearch: () -> Unit,
     onOpenHome: () -> Unit,
 ) {
@@ -831,32 +800,11 @@ private fun ProviderRow(
                 if (loading) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 } else {
-                    Text(setupLabel ?: "识图")
+                    Text("识图")
                 }
             }
         }
     }
-}
-
-/** SauceNAO 未配置 API Key 时的说明框：告诉用户去哪里填，并给出官网入口。 */
-@Composable
-private fun SauceNaoKeyDialog(
-    onDismiss: () -> Unit,
-    onOpenHome: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("SauceNAO 需要 API Key") },
-        text = {
-            Text("SauceNAO 需要在「设置 → 联网识图」填 API Key（免费注册）。注册后在账号页复制 API Key，粘贴到设置里即可。")
-        },
-        confirmButton = {
-            TextButton(onClick = onOpenHome) { Text("打开官网") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("知道了") }
-        },
-    )
 }
 
 /**

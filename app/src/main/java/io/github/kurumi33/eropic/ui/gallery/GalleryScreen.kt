@@ -11,15 +11,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -45,6 +49,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.media.SortOrder
+import io.github.kurumi33.eropic.core.settings.AppSettings
 import io.github.kurumi33.eropic.core.settings.DateGroupMode
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
@@ -81,7 +86,9 @@ fun GalleryScreen(
     val pagingItems = viewModel.media.collectAsLazyPagingItems()
     // 捏合改列数只覆盖本次浏览，不回写设置。
     var columnOverride by remember { mutableStateOf<Int?>(null) }
-    val columns = (columnOverride ?: settings.gridColumns).coerceIn(3, 8)
+    // 列数范围与 SettingsRepository 完全一致（v0.6 起 2..8；两边都引用 AppSettings 常量）
+    val columns = (columnOverride ?: settings.gridColumns)
+        .coerceIn(AppSettings.MIN_GRID_COLUMNS, AppSettings.MAX_GRID_COLUMNS)
     LaunchedEffect(settings.gridColumns) { columnOverride = null }
 
     // 已折叠的分组键（日期键，见 GalleryGroupDates）；rememberSaveable 让旋转屏幕后仍然保持折叠。
@@ -136,11 +143,93 @@ fun GalleryScreen(
                     null
                 },
                 actions = {
-                    // 排序：默认按拍摄时间倒序，菜单里打勾显示当前档
+                    // 搜索入口：直接放顶栏（「更多」菜单里也保留一项，两条路都能进搜索页）
+                    IconButton(onClick = { viewModel.openScreen(AppScreen.Search) }) {
+                        Icon(imageVector = Icons.Filled.Search, contentDescription = "搜索图片")
+                    }
+                    // 列数缩放：立即写回设置，网格马上重排；到边界后按钮自动置灰
+                    IconButton(
+                        onClick = { viewModel.setGridColumns(settings.gridColumns - 1) },
+                        enabled = settings.gridColumns > MIN_GRID_COLUMNS,
+                    ) {
+                        Icon(imageVector = Icons.Filled.Remove, contentDescription = "减少每行列数")
+                    }
+                    IconButton(
+                        onClick = { viewModel.setGridColumns(settings.gridColumns + 1) },
+                        enabled = settings.gridColumns < MAX_GRID_COLUMNS,
+                    ) {
+                        Icon(imageVector = Icons.Filled.Add, contentDescription = "增加每行列数")
+                    }
+                    // 顶栏一行塞不下 7 个图标：排序 / 只看收藏 / 显示方式 连同二级页面统一收进「更多」。
+                    // 搜索与加减列数留在顶栏直接可见（常用、需要一眼看到）。
                     Box {
-                        IconButton(onClick = { sortMenuOpen = true }) {
-                            Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = "排序")
+                        IconButton(onClick = { moreMenuOpen = true }) {
+                            Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "更多")
                         }
+                        DropdownMenu(expanded = moreMenuOpen, onDismissRequest = { moreMenuOpen = false }) {
+                            // 「排序」「显示方式」点开后复用同一个锚点弹出二级菜单（见本 Box 末尾）
+                            DropdownMenuItem(
+                                text = { Text("排序：" + sortOrder.label) },
+                                leadingIcon = {
+                                    Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null)
+                                },
+                                onClick = {
+                                    moreMenuOpen = false
+                                    sortMenuOpen = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (favoritesOnly) "取消只看收藏" else "只看收藏") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = if (favoritesOnly) {
+                                            Icons.Filled.Favorite
+                                        } else {
+                                            Icons.Filled.FavoriteBorder
+                                        },
+                                        contentDescription = null,
+                                        tint = if (favoritesOnly) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            LocalContentColor.current
+                                        },
+                                    )
+                                },
+                                onClick = {
+                                    moreMenuOpen = false
+                                    viewModel.toggleFavoritesFilter()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("显示方式：" + settings.dateGroupMode.label) },
+                                leadingIcon = {
+                                    Icon(imageVector = Icons.Filled.CalendarMonth, contentDescription = null)
+                                },
+                                onClick = {
+                                    moreMenuOpen = false
+                                    groupMenuOpen = true
+                                },
+                            )
+                            HorizontalDivider()
+                            // 二级页面：识图 / 搜索 / 存储 / 历史 / 文件夹管理 / 清理报告
+                            listOf(
+                                "以图搜图" to AppScreen.ImageFind,
+                                "搜索图片" to AppScreen.Search,
+                                "存储总览" to AppScreen.Storage,
+                                "操作历史" to AppScreen.History,
+                                "文件夹管理" to AppScreen.FolderManager,
+                                "清理报告" to AppScreen.CleanupReport,
+                            ).forEach { (label, screen) ->
+                                DropdownMenuItem(
+                                    text = { Text(label) },
+                                    onClick = {
+                                        moreMenuOpen = false
+                                        viewModel.openScreen(screen)
+                                    },
+                                )
+                            }
+                        }
+                        // 二级菜单：排序（当前档打勾）
                         DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
                             SortOrder.entries.forEach { order ->
                                 DropdownMenuItem(
@@ -157,27 +246,7 @@ fun GalleryScreen(
                                 )
                             }
                         }
-                    }
-                    // 只看收藏：点亮时用实心图标 + 主题色，关掉是描边图标（原先是「全部/收藏」两个 chip）
-                    IconButton(onClick = { viewModel.toggleFavoritesFilter() }) {
-                        Icon(
-                            imageVector = if (favoritesOnly) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                            contentDescription = if (favoritesOnly) "只看收藏（已开启）" else "只看收藏（已关闭）",
-                            tint = if (favoritesOnly) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                LocalContentColor.current
-                            },
-                        )
-                    }
-                    // 显示方式：按月 / 按日 / 不分组。改了立即生效并写回设置，下次打开还是这一档。
-                    Box {
-                        IconButton(onClick = { groupMenuOpen = true }) {
-                            Icon(
-                                imageVector = Icons.Filled.CalendarMonth,
-                                contentDescription = "显示方式：" + settings.dateGroupMode.label,
-                            )
-                        }
+                        // 二级菜单：显示方式（按月 / 按日 / 不分组，立即生效并写回设置）
                         DropdownMenu(expanded = groupMenuOpen, onDismissRequest = { groupMenuOpen = false }) {
                             DateGroupMode.entries.forEach { mode ->
                                 DropdownMenuItem(
@@ -190,30 +259,6 @@ fun GalleryScreen(
                                     onClick = {
                                         viewModel.setDateGroupMode(mode)
                                         groupMenuOpen = false
-                                    },
-                                )
-                            }
-                        }
-                    }
-                    // 更多二级页面：搜索 / 存储 / 历史 / 文件夹管理 / 清理报告
-                    Box {
-                        IconButton(onClick = { moreMenuOpen = true }) {
-                            Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "更多")
-                        }
-                        DropdownMenu(expanded = moreMenuOpen, onDismissRequest = { moreMenuOpen = false }) {
-                            listOf(
-                                "以图搜图" to AppScreen.ImageFind,
-                                "搜索图片" to AppScreen.Search,
-                                "存储总览" to AppScreen.Storage,
-                                "操作历史" to AppScreen.History,
-                                "文件夹管理" to AppScreen.FolderManager,
-                                "清理报告" to AppScreen.CleanupReport,
-                            ).forEach { (label, screen) ->
-                                DropdownMenuItem(
-                                    text = { Text(label) },
-                                    onClick = {
-                                        moreMenuOpen = false
-                                        viewModel.openScreen(screen)
                                     },
                                 )
                             }
@@ -441,3 +486,12 @@ private val CollapsedKeysSaver: Saver<Set<String>, ArrayList<String>> = Saver(
     save = { ArrayList(it) },
     restore = { it.toSet() },
 )
+
+/**
+ * 图库每行可用的列数范围（v0.6 由 3..6 放开到 2..8）。
+ *
+ * 直接引用 AppSettings 的常量，避免按钮判定与 SettingsRepository 的钳制再次不一致
+ * （历史上两边写死不同范围时，按「减」会被仓库层静默钳回，按钮看着能点但网格不动）。
+ */
+private const val MIN_GRID_COLUMNS = AppSettings.MIN_GRID_COLUMNS
+private const val MAX_GRID_COLUMNS = AppSettings.MAX_GRID_COLUMNS

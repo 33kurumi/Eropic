@@ -59,7 +59,7 @@ enum class DateGroupMode(val label: String) {
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val dynamicColor: Boolean = true,
-    /** 图库网格列数，3~6。 */
+    /** 图库网格列数，2~8（v0.6：顶栏加减按钮与设置页共用同一范围）。 */
     val gridColumns: Int = 4,
     /** 标题栏是否显示"张数 · 总大小"。 */
     val showMeta: Boolean = true,
@@ -88,13 +88,6 @@ data class AppSettings(
     /** M4：扫描时排除的目录（相对路径，不带结尾斜杠）。 */
     val scanExcludedDirs: List<String> = emptyList(),
     /**
-     * v0.3：SauceNAO 的 API Key。
-     *
-     * SauceNAO 是少数必须带 key 的识图服务（免费注册后拿到个人 key）；
-     * 不填也能用 Google Lens / Yandex / ascii2d，所以默认空串。
-     */
-    val sauceNaoApiKey: String = "",
-    /**
      * v0.5：文件夹置顶列表（存相对路径，不带结尾斜杠）。
      *
      * 文件夹树里同一层内，置顶的排在最前面；列表与网格两种布局都生效。
@@ -118,4 +111,15 @@ data class AppSettings(
         includeHidden = scanIncludeHidden,
         excludedDirs = scanExcludedDirs,
     )
+
+    companion object {
+        /**
+         * 网格列数可调范围（v0.6）。
+         *
+         * 图库/文件夹顶栏的加减按钮、设置页档位、DataStore 读写夹值三处共用这一对常量，
+         * 否则会出现"按钮还能点、列数却被悄悄夹回去"的诡异现象。
+         */
+        const val MIN_GRID_COLUMNS = 2
+        const val MAX_GRID_COLUMNS = 8
+    }
 }

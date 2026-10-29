@@ -22,6 +22,7 @@ import io.github.kurumi33.eropic.core.index.SignatureGenerator
 import io.github.kurumi33.eropic.core.notify.TrashCleanupScheduler
 import io.github.kurumi33.eropic.core.trash.TrashRepository
 import io.github.kurumi33.eropic.core.media.MediaRepository
+import io.github.kurumi33.eropic.core.search.SearchHistoryStore
 import io.github.kurumi33.eropic.core.settings.SettingsRepository
 import io.github.kurumi33.eropic.core.thumb.ThumbnailBackfill
 import io.github.kurumi33.eropic.core.thumb.ThumbnailCache
@@ -31,6 +32,9 @@ class AppContainer(context: Context) {
     val appContext: Context = context.applicationContext
     val database: EropicDatabase = EropicDatabase.build(appContext)
     val settingsRepository: SettingsRepository = SettingsRepository(appContext)
+
+    /** v0.6：图库/文件夹搜索历史（独立 DataStore，最多 50 条）。 */
+    val searchHistoryStore: SearchHistoryStore = SearchHistoryStore(appContext)
     val thumbnailCache: ThumbnailCache = ThumbnailCache(appContext, appContext.contentResolver)
     val mediaRepository: MediaRepository = MediaRepository(appContext, database)
     val signatureGenerator: SignatureGenerator = SignatureGenerator(appContext.contentResolver, thumbnailCache)

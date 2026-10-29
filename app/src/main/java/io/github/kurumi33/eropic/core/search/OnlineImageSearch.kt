@@ -32,10 +32,12 @@ import okhttp3.Response
  * 这里用的都是**非官方网页接口**（这些服务没有对个人开发者开放的匿名上传 API），
  * 一旦某家改版，照着注释重新抓一次就能修，不用去翻逆向脚本。
  *
- * 六家的现状（2026-10 对照 PicImageSearch）：
+ * 五家的现状（2026-10 对照 PicImageSearch；v0.6 去掉了 Yandex——结果页依赖服务端 302，稳定性差，
+ * 且国内同样要代理，实测反而不如百度/ascii2d 好用）：
  * - Google Lens：POST /v3/upload，字段 encoded_image；**带 hl 参数会 403**（PicImageSearch 注释明确写了）；
- * - Yandex：POST /images/search?rpt=imageview&cbir_page=sites + prg=1，字段 upfile，跟随后重定向拿结果页；
  * - 百度识图：POST graph.baidu.com/upload，字段 image + from=pc，JSON 里取 data.url；
+ *   **不需要 Cookie**，但必须带空的 `Acs-Token` 头（缺了返回 {"status":1,"msg":"Reject"}），
+ *   且实测 >5MB 会被直接掐断连接、HEIC 不认 —— 所以超过 4MB 或非 jpeg/png 时先本地转 1600 长边 JPEG；
  * - SauceNAO：官方 API，必须带个人 key，表单 api_key/output_type=2/file；
  * - ascii2d：POST /search/file?type=color，字段 file，成功后 302 到 /search/color/<hash>；
  * - IQDB：POST iqdb.org，字段 file，结果页就是重定向后的 URL。
@@ -45,11 +47,6 @@ import okhttp3.Response
  */
 class OnlineImageSearch(
     private val contentResolver: ContentResolver,
-    /**
-     * 每次搜索时现取 SauceNAO 的 API Key（而不是构造时取一次）：
-     * 用户在设置页填完 key 立刻生效，不用重建 ViewModel 或重进页面。
-     */
-    private val sauceNaoApiKey: () -> String,
 ) {
 
     suspend fun search(uri: Uri, provider: ReverseImageProvider): OnlineSearchResult =
@@ -80,7 +77,6 @@ class OnlineImageSearch(
     private fun execute(bytes: ByteArray, mime: String, provider: ReverseImageProvider): OnlineSearchResult =
         when (provider) {
             ReverseImageProvider.GOOGLE_LENS -> googleLens(bytes, mime)
-            ReverseImageProvider.YANDEX -> yandex(bytes, mime)
             ReverseImageProvider.BAIDU -> baidu(bytes, mime)
             ReverseImageProvider.SAUCENAO -> sauceNao(bytes, mime)
             ReverseImageProvider.ASCII2D -> ascii2d(bytes, mime)
@@ -126,51 +122,19 @@ class OnlineImageSearch(
     }
 
     /**
-     * Yandex 识图（对照 PicImageSearch/engines/yandex.py）。
-     *
-     * 端点（非官方）：POST https://yandex.com/images/search?rpt=imageview&cbir_page=sites
-     * 表单数据：prg=1；文件字段 upfile（**原始字节，不带文件名**，PicImageSearch 就是直接塞 bytes）
-     * 结果 URL：服务端 302/303 到结果页，取重定向后的 resp.url（带 cbir_id）。
-     *          URL 抓不到时再退回 JSON 里找 cbir_id 自己拼。
-     */
-    private fun yandex(bytes: ByteArray, mime: String): OnlineSearchResult {
-        val provider = ReverseImageProvider.YANDEX
-        val url = UPLOAD_URL_YANDEX.toHttpUrlOrNull()
-            ?.newBuilder()
-            ?.addQueryParameter("rpt", "imageview")
-            ?.addQueryParameter("cbir_page", "sites")
-            ?.build()
-            ?: return failed(provider, "内部错误：上传地址拼装失败")
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("prg", "1")
-            // 文件名用 blob：Yandex 用扩展名判断类型，别传中文文件名
-            .addFormDataPart("upfile", "blob", bytes.toRequestBody(mime.toMediaType()))
-            .build()
-        post(url, body).use { response ->
-            val finalUrl = response.request.url.toString()
-            if (!response.isSuccessful) {
-                return failed(provider, "Yandex 返回 HTTP " + response.code)
-            }
-            if (finalUrl.contains("cbir_id") || finalUrl.contains("rpt=imageview")) {
-                return OnlineSearchResult(provider = provider, ok = true, resultUrl = finalUrl)
-            }
-            val text = response.body?.string().orEmpty()
-            val result = ReverseSearchParsers.yandexResultUrl(text)
-                ?: return failed(provider, "Yandex 没有解析出结果页链接（接口可能已变更）")
-            return OnlineSearchResult(provider = provider, ok = true, resultUrl = result)
-        }
-    }
-
-    /**
      * 百度识图（对照 PicImageSearch/engines/baidu.py）。
      *
      * 端点（非官方）：POST https://graph.baidu.com/upload
-     * 请求头：Acs-Token: 空字符串（PicImageSearch 显式带了，缺了偶尔会被拒）
+     * 请求头：Acs-Token: 空字符串（PicImageSearch 显式带了；**不能用 Cookie 代替**，2026-10-28 实测
+     *        缺这个头会返回 {"status":1,"msg":"Reject"}，带了空值才成功）
      * 表单字段：image = 图片文件、from = pc
      * 返回 JSON：{"status":0,"data":{"url":"https://graph.baidu.com/s?..."}}，取 data.url 直接打开即可。
      * 该结果页里 window.cardData 的 cardName 可能是 noresult（无结果）/ same（同图）/ simipic（相似图），
      * 那是页面内的事，我们只要把用户送到结果页。
+     *
+     * 体积限制（v0.6 实测）：空图返回 status=1002「Params illegal」；7MB 损坏图会直接连接被断；
+     * 手机原图 6-10MB，所以超过 [BAIDU_SHRINK_THRESHOLD_BYTES] 或非 jpeg/png 时先本地缩成 JPEG 再传，
+     * 否则用户只会看到一句莫名其妙的失败。
      *
      * 这是整套联网识图里**唯一国内直连不需要代理**的一家。
      */
@@ -178,14 +142,21 @@ class OnlineImageSearch(
         val provider = ReverseImageProvider.BAIDU
         val url = UPLOAD_URL_BAIDU.toHttpUrlOrNull()
             ?: return failed(provider, "内部错误：上传地址拼装失败")
+        val needsShrink = bytes.size > BAIDU_SHRINK_THRESHOLD_BYTES ||
+            (mime != "image/jpeg" && mime != "image/png")
+        // 缩图失败（格式不支持/内存不足）时退回原图：宁可让百度报错，也不要直接告诉用户搜不了
+        val payload = if (needsShrink) shrinkForUpload(bytes, BAIDU_LONG_EDGE) ?: bytes else bytes
+        val payloadMime = if (payload !== bytes) "image/jpeg" else mime
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("image", IMAGE_FILE_NAME, bytes.toRequestBody(mime.toMediaType()))
+            .addFormDataPart("image", IMAGE_FILE_NAME, payload.toRequestBody(payloadMime.toMediaType()))
             .addFormDataPart("from", "pc")
             .build()
         post(url, body, referer = "https://graph.baidu.com/", extraHeaders = listOf("Acs-Token" to "")).use { response ->
-            if (!response.isSuccessful) return failed(provider, "百度识图返回 HTTP " + response.code)
+            if (!response.isSuccessful) return failed(provider, baiduHttpMessage(response.code))
             val text = response.body?.string().orEmpty()
+            val status = ReverseSearchParsers.baiduStatus(text)
+            if (status != null && status != 0) return failed(provider, baiduStatusMessage(status))
             val resultUrl = ReverseSearchParsers.baiduResultUrl(text)
                 ?: return failed(
                     provider,
@@ -214,10 +185,9 @@ class OnlineImageSearch(
      */
     private fun sauceNao(bytes: ByteArray, mime: String): OnlineSearchResult {
         val provider = ReverseImageProvider.SAUCENAO
-        val apiKey = sauceNaoApiKey().trim()
-        // 没 key 就不发请求：既省流量，也避免服务端回 403 让用户以为网络坏了
-        if (apiKey.isEmpty()) return failed(provider, SAUCE_NAO_NO_KEY_MESSAGE)
-        val shrunk = shrinkForSauceNao(bytes)
+        // v0.6：key 内置在代码里（用户自己的账号），设置页不再有输入框，也不用再判断"未配置"
+        val apiKey = SAUCE_NAO_API_KEY
+        val shrunk = shrinkForUpload(bytes, SAUCE_NAO_LONG_EDGE, SAUCE_NAO_SHRINK_THRESHOLD_BYTES)
         val payload = shrunk ?: bytes
         val payloadMime = if (shrunk != null) "image/jpeg" else mime
         val url = UPLOAD_URL_SAUCE_NAO.toHttpUrlOrNull()
@@ -261,15 +231,18 @@ class OnlineImageSearch(
     }
 
     /**
-     * 把超过 [SAUCE_NAO_SHRINK_THRESHOLD_BYTES] 的图缩到 [SAUCE_NAO_LONG_EDGE] 长边并重新编码成 JPEG。
+     * 把图片缩到 [longEdge] 长边并重新编码成 JPEG。
+     *
+     * [thresholdBytes] > 0 时表示"只有超过这个体积才缩"，调用方判断过就不必再传；
+     * 传 0 表示无条件缩（百度识图这种按格式/体积判断后已经决定的场景）。
      *
      * 用 ImageDecoder 而不是 BitmapFactory：它会按 EXIF 自动摆正方向，
      * 而 pixiv 这类索引对旋转很敏感，转了 90 度匹配率会明显下降。
      * 缩失败（格式不支持、内存不足）返回 null，调用方按原图上传 ——
      * 宁可让服务端拒绝，也不能因为本地转码失败就直接告诉用户「搜不了」。
      */
-    private fun shrinkForSauceNao(bytes: ByteArray): ByteArray? {
-        if (bytes.size <= SAUCE_NAO_SHRINK_THRESHOLD_BYTES) return null
+    private fun shrinkForUpload(bytes: ByteArray, longEdge: Int, thresholdBytes: Int = 0): ByteArray? {
+        if (thresholdBytes > 0 && bytes.size <= thresholdBytes) return null
         return runCatching {
             val source = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
             val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
@@ -277,7 +250,7 @@ class OnlineImageSearch(
                 decoder.isMutableRequired = false
                 val width = info.size.width.coerceAtLeast(1)
                 val height = info.size.height.coerceAtLeast(1)
-                val scale = min(1f, SAUCE_NAO_LONG_EDGE.toFloat() / max(width, height).toFloat())
+                val scale = min(1f, longEdge.toFloat() / max(width, height).toFloat())
                 if (scale < 1f) {
                     decoder.setTargetSize(
                         (width * scale).toInt().coerceAtLeast(1),
@@ -402,7 +375,6 @@ class OnlineImageSearch(
 
     private companion object {
         const val UPLOAD_URL_GOOGLE_LENS = "https://lens.google.com/v3/upload"
-        const val UPLOAD_URL_YANDEX = "https://yandex.com/images/search"
         const val UPLOAD_URL_BAIDU = "https://graph.baidu.com/upload"
         const val UPLOAD_URL_SAUCE_NAO = "https://saucenao.com/search.php"
         const val UPLOAD_URL_ASCII2D = "https://ascii2d.net/search/file"
@@ -413,6 +385,17 @@ class OnlineImageSearch(
 
         /** 20MB：比各家上限都宽，真正的限制交给服务端；这里只防「把 100MB 扫描件读进内存」。 */
         const val MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+        /**
+         * v0.6：SauceNAO 的 API Key 内置（用户本人的 key，写在需求里要求不再做成设置项）。
+         *
+         * 放在代码里意味着公开仓库里能看到它——这点已经和用户确认过（侧载自用，key 是他自己的）。
+         */
+        const val SAUCE_NAO_API_KEY = "8673cc597E30FF0A9BFFDEDb8E548F96F5EBA256"
+
+        /** 百度上传接口实测 >5MB 会被掐断连接；4MB 留余量，缩完通常只剩几百 KB。 */
+        const val BAIDU_SHRINK_THRESHOLD_BYTES = 4 * 1024 * 1024
+        const val BAIDU_LONG_EDGE = 1600
 
         /** 超过 1.5MB 就先缩图：SauceNAO 网页上传上限只有几 MB，手机原图基本都超。 */
         const val SAUCE_NAO_SHRINK_THRESHOLD_BYTES = 1500 * 1024
@@ -457,12 +440,6 @@ internal object ReverseSearchParsers {
         val extUrl: String?,
     )
 
-    /** Yandex JSON 里的 "url":"..." 字段（值里可能含有转义字符）。 */
-    private val YANDEX_URL_FIELD = Regex("\"url\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
-
-    /** cbir_id=xxx（查询串）/ cbir_id%3Dxxx（已编码）/ "cbir_id":"xxx"（JSON 字段）三种写法。 */
-    private val YANDEX_CBIR_ID = Regex("cbir_id(?:%3D|%3d|[^A-Za-z0-9]{1,4})([A-Za-z0-9_\\-]{6,})")
-
     /** Lens 结果页：老式 lens.google.com 链接。 */
     private val GOOGLE_LENS_RESULT_URL = Regex("https://lens\\.google\\.com/(?:search|uploadbyurl)\\?[^\"'<>\\s]+")
 
@@ -481,27 +458,6 @@ internal object ReverseSearchParsers {
     private val SAUCE_NAO_INDEX_NAME = Regex("\"index_name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
 
     private val SAUCE_NAO_TITLE = Regex("\"title\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
-
-    /**
-     * 从 Yandex 的上传响应里取结果页 URL。
-     *
-     * 优先取带 cbir_id / rpt=imageview 的那个 "url" 字段：响应里可能还有缩略图等别的 url 字段，
-     * 取第一个会拿到错的东西。全都取不到时用 cbir_id 自己拼。
-     */
-    fun yandexResultUrl(body: String): String? {
-        val candidates = YANDEX_URL_FIELD.findAll(body)
-            .map { unescapeJsonString(it.groupValues[1]) }
-            .toList()
-        val raw = candidates.firstOrNull { it.contains("cbir_id") || it.contains("rpt=imageview") }
-            ?: candidates.firstOrNull()
-        if (!raw.isNullOrBlank()) {
-            if (raw.startsWith("http://") || raw.startsWith("https://")) return raw
-            val query = raw.removePrefix("?").trim()
-            if (query.isNotEmpty()) return "https://yandex.com/images/search?$query"
-        }
-        val cbirId = YANDEX_CBIR_ID.find(body)?.groupValues?.get(1) ?: return null
-        return "https://yandex.com/images/search?rpt=imageview&cbir_id=$cbirId"
-    }
 
     /**
      * 从 Google Lens 的 HTML 响应里抓结果页链接。
@@ -538,6 +494,13 @@ internal object ReverseSearchParsers {
                 extUrl = firstHttpUrlInArray(obj, "ext_urls"),
             )
         }
+
+    /** 百度识图返回体顶层的 "status"：0 成功、1 Reject、1002 参数非法…… */
+    private val BAIDU_STATUS = Regex("\"status\"\\s*:\\s*(-?\\d+)")
+
+    /** 百度识图的业务状态码；响应不是 JSON 时为 null。 */
+    fun baiduStatus(body: String): Int? =
+        BAIDU_STATUS.find(body)?.groupValues?.get(1)?.toIntOrNull()
 
     /** 百度识图返回体里的 "url":"https://graph.baidu.com/s?..."（值可能带转义斜杠）。 */
     private val BAIDU_URL_FIELD = Regex("\"url\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
@@ -676,13 +639,23 @@ internal object ReverseSearchParsers {
     }
 }
 
-/** SauceNAO 未配置 API Key 时的提示：必须告诉用户去哪儿填，否则只会看到一句「失败」。 */
-internal const val SAUCE_NAO_NO_KEY_MESSAGE =
-    "请在 设置 → 联网识图 填 SauceNAO API Key（在 saucenao.com 免费注册账号即可获取）"
+/** 百度识图业务状态码到中文提示（v0.6：实测缺 Acs-Token 头会回 status=1 Reject）。 */
+internal fun baiduStatusMessage(status: Int): String = when (status) {
+    1 -> "百度识图拒绝了这次上传（校验失败或接口已变更），请稍后再试或改用其它识图服务"
+    1002 -> "百度识图认为图片参数不合法，请换一张图片再试"
+    else -> "百度识图返回错误码 " + status + "，请稍后再试"
+}
 
-/** SauceNAO 业务错误码（header.status）到中文提示。 */
+/** 百度识图的 HTTP 状态码到中文提示。 */
+internal fun baiduHttpMessage(code: Int): String = when (code) {
+    413 -> "图片太大，百度识图拒绝接收，请先裁剪或换一张"
+    429 -> "百度识图请求太频繁，请稍后再试"
+    else -> "百度识图返回 HTTP " + code
+}
+
+/** SauceNAO 业务错误码（header.status）到中文提示；key 已内置，用户不需要去设置里改。 */
 internal fun sauceNaoStatusMessage(status: Int): String = when (status) {
-    -1 -> "SauceNAO 认为 API Key 无效或额度已用尽，请到 设置 → 联网识图 检查后重填"
+    -1 -> "SauceNAO 认为 API Key 无效或额度已用尽（key 内置在应用里，通常是当日额度用完），请稍后再试"
     -2 -> "SauceNAO 请求太频繁（免费额度有冷却时间），请稍后再试"
     -3 -> "SauceNAO 搜索出错，请稍后再试"
     else -> "SauceNAO 返回错误码 " + status + "，请稍后再试"
@@ -690,7 +663,7 @@ internal fun sauceNaoStatusMessage(status: Int): String = when (status) {
 
 /** SauceNAO 的 HTTP 状态码到中文提示（服务端连 status 都不给时只能靠它）。 */
 internal fun sauceNaoHttpMessage(code: Int): String = when (code) {
-    403 -> "SauceNAO 拒绝访问：API Key 无效或额度已用尽，请到 设置 → 联网识图 检查"
+    403 -> "SauceNAO 拒绝访问：key 无效或额度已用尽（内置 key，通常稍后自动恢复）"
     413 -> "图片太大，SauceNAO 拒绝接收，请先裁剪或换一张"
     429 -> "SauceNAO 请求太频繁，请稍后再试"
     400 -> "SauceNAO 无法处理这张图片（格式或内容不受支持），请换一张"

@@ -1,5 +1,7 @@
 package io.github.kurumi33.eropic.core.search
 
+import io.github.kurumi33.eropic.core.query.SearchText
+
 /**
  * 本地「以图搜图」的一条命中。
  *
@@ -58,11 +60,11 @@ data class SimilarityQuery(
  * 采用 PicImageSearch 的理由：它是目前维护最勤的 Python 多引擎实现，字段名改动能第一时间发现，
  * 出问题时可以逐行对照，而不是靠猜。
  *
- * 保留六家（都支持「匿名 multipart 上传本地图片」这一条硬要求）：
+ * 保留五家（都支持「匿名 multipart 上传本地图片」这一条硬要求）；
+ * v0.6 去掉了 Yandex：结果页依赖服务端 302，稳定性最差，且国内同样要代理，实际可用性不如别家。
  * - [GOOGLE_LENS]：通用识图覆盖最好；
- * - [YANDEX]：实拍与二次元都能用，服务端直接 302 到结果页；
  * - [BAIDU]：百度识图，**国内不需要代理**，是唯一能当兜底用的；
- * - [SAUCENAO]：二次元索引最全，但官方 API 必须带个人 Key（PicImageSearch 同样要 api_key）；
+ * - [SAUCENAO]：二次元索引最全，官方 API 需 api_key（v0.6 起 key 内置在代码里，不再让用户填）；
  * - [ASCII2D]：二次元以图搜图，匿名可用；
  * - [IQDB]：老牌二次元图库检索，匿名可用（国内通常要代理）。
  *
@@ -76,13 +78,10 @@ enum class ReverseImageProvider(val label: String, val homeUrl: String) {
     /** Google Lens：匿名上传最稳的一家，通用图片覆盖最好。 */
     GOOGLE_LENS("Google Lens", "https://lens.google.com/"),
 
-    /** Yandex 识图：实拍与二次元都能用，匿名上传后 302 到结果页。 */
-    YANDEX("Yandex", "https://yandex.com/images/"),
-
     /** 百度识图：匿名上传，国内直连不需要代理；实拍/中文场景覆盖好，二次元一般。 */
     BAIDU("百度识图", "https://graph.baidu.com/"),
 
-    /** SauceNAO：pixiv / twitter / danbooru 等索引，二次元识图最准；必须先在设置里填 API Key。 */
+    /** SauceNAO：pixiv / twitter / danbooru 等索引，二次元识图最准；key 已内置。 */
     SAUCENAO("SauceNAO", "https://saucenao.com/"),
 
     /** ascii2d：二次元以图搜图，匿名可用。 */
@@ -115,14 +114,15 @@ data class OnlineSearchResult(
 /**
  * 关键词查询（文件名 + 目录路径）的语法解析。
  *
- * 语法（v0.5 起）：
+ * 语法（v0.6 起，与图库搜索共用 [io.github.kurumi33.eropic.core.query.SearchText]）：
  * - 空格分隔多个条件 = **全部满足**（AND）：`cat 2024` 要求文件名或目录同时含 cat 与 2024；
- * - `|` 表示**或**（OR）：`cat|kitten` 命中任意一个即可，可与空格组合：`cat|kitten 2024`；
+ * - 用双引号包住 = **整段连在一起**：`"my cat"` 要求文件名/目录里出现带空格的这一整段；
  * - `-前缀` 表示**排除**：`cat -screenshot` 命中 cat 但不含 screenshot；
- * - 不区分大小写、按子串匹配（`cat` 会命中 `vacation.jpg`）；`%` 与 `_` 按普通字符处理；
- * - 引号不做特殊处理（不需要精确短语，空格本身就是 AND）。
+ * - `|` 仍表示**或**（兼容 v0.5）：`cat|kitten` 命中任意一个即可；
+ * - 不区分大小写、按子串匹配（`cat` 会命中 `vacation.jpg`）；`%` 与 `_` 按普通字符处理。
  *
- * 抽成纯函数是为了能在 JVM 单测里直接断言，也避免 UI 与仓库层各写一套。
+ * 解析本身在 [io.github.kurumi33.eropic.core.query.SearchText] 里，这里只做适配：
+ * 识图页的关键词辅助与图库搜索必须完全同一套语义，否则用户会发现两处结果对不上。
  */
 internal object KeywordSyntax {
 
@@ -135,23 +135,8 @@ internal object KeywordSyntax {
     }
 
     fun parse(raw: String?): Query {
-        val text = raw?.trim().orEmpty()
-        if (text.isEmpty()) return Query(emptyList(), emptyList())
-        val includes = ArrayList<List<String>>()
-        val excludes = ArrayList<String>()
-        // 用正则切空白（含全角空格），避免用户从别处粘贴来的不间断空格把词粘在一起
-        for (token in text.split(WHITESPACE)) {
-            if (token.isEmpty()) continue
-            if (token.length > 1 && token.startsWith("-")) {
-                excludes += token.substring(1).lowercase()
-                continue
-            }
-            val alternatives = token.split('|')
-                .map { it.trim().lowercase() }
-                .filter { it.isNotEmpty() }
-            if (alternatives.isNotEmpty()) includes += alternatives
-        }
-        return Query(includes, excludes)
+        val parsed = SearchText.parse(raw)
+        return Query(parsed.groups, parsed.excludes)
     }
 
     /** 是否命中：任一 include 组整体不满足就失败；excludes 命中任意一个就失败。 */
@@ -169,8 +154,6 @@ internal object KeywordSyntax {
 
     fun matches(displayName: String, relativePath: String, raw: String?): Boolean =
         matches(displayName, relativePath, parse(raw))
-
-    private val WHITESPACE = Regex("[\\s\\u3000]+")
 }
 
 /**
