@@ -34,7 +34,10 @@ google-services.json
 # 本机构建缓存（DSH 沙箱内使用，不提交）
 .gradle-home/
 .android-home/
-/docs/search
+# 内部开发文档（只在本机看，不进 git）
+/dev-docs/
+# i18n 字面量清单等本地临时产物
+/.local/
 # 本机构建日志
 /.build-*.txt
 # Kotlin 增量编译会话目录

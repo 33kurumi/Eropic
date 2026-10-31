@@ -33,7 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
+import io.github.kurumi33.eropic.ui.i18n.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -52,6 +52,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurumi33.eropic.core.media.SortOrder
+import io.github.kurumi33.eropic.core.settings.AppLanguage
 import io.github.kurumi33.eropic.core.settings.AppSettings
 import io.github.kurumi33.eropic.core.settings.DateGroupMode
 import io.github.kurumi33.eropic.core.settings.RetentionOption
@@ -62,6 +63,7 @@ import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
+import io.github.kurumi33.eropic.ui.i18n.LangState
 import io.github.kurumi33.eropic.ui.components.openSystemStorageAccessSettings
 import io.github.kurumi33.eropic.ui.update.UpdateSection
 import kotlinx.coroutines.launch
@@ -123,6 +125,14 @@ fun SettingsScreen(viewModel: EropicViewModel) {
                 subtitle = "主题与取色。",
             ) {
                 AppearanceCard(settings = settings, viewModel = viewModel)
+            }
+
+            // v1.1：界面语言。英文是「渲染期翻译」实现的，切换后不用重启、也不丢当前页状态。
+            SettingsSection(
+                title = "语言",
+                subtitle = "界面语言：中文 / English。切换立即生效。",
+            ) {
+                LanguageCard(settings = settings, viewModel = viewModel)
             }
 
             SettingsSection(
@@ -310,6 +320,41 @@ private fun AppearanceCard(settings: AppSettings, viewModel: EropicViewModel) {
         checked = settings.dynamicColor,
         onCheckedChange = viewModel::setDynamicColor,
     )
+}
+
+/**
+ * 语言分组（v1.1）。
+ *
+ * 注意：这里的选项文字走的是同一个渲染期翻译器，所以英文模式下
+ * "跟随系统 / 简体中文 / English" 会显示成对应英文（"简体中文" 保持原样，方便中文用户切回）。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LanguageCard(settings: AppSettings, viewModel: EropicViewModel) {
+    Text(text = "界面语言", style = MaterialTheme.typography.labelLarge)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        AppLanguage.entries.forEach { language ->
+            FilterChip(
+                selected = settings.appLanguage == language,
+                onClick = { viewModel.setAppLanguage(language) },
+                label = { Text(languageLabel(language)) },
+            )
+        }
+    }
+    Text(
+        text = "英文界面在渲染时即时翻译现有中文文案，切换后无需重启；" +
+            "个别长句或第三方名称仍可能是中文，后续版本会继续完善。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** 语言选项的显示名：跟随系统时补上「当前实际生效」的提示。 */
+@Composable
+private fun languageLabel(language: AppLanguage): String = when (language) {
+    AppLanguage.SYSTEM -> if (LangState.isEnglish) "System default (跟随系统)" else "跟随系统 / System"
+    AppLanguage.CHINESE -> "简体中文"
+    AppLanguage.ENGLISH -> "English"
 }
 
 @Composable

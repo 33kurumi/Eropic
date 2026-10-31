@@ -46,6 +46,7 @@ import io.github.kurumi33.eropic.core.search.OnlineSearchResult
 import io.github.kurumi33.eropic.core.search.ReverseImageProvider
 import io.github.kurumi33.eropic.core.search.SimilarImageHit
 import io.github.kurumi33.eropic.core.search.SimilarityQuery
+import io.github.kurumi33.eropic.core.settings.AppLanguage
 import io.github.kurumi33.eropic.core.settings.AppSettings
 import io.github.kurumi33.eropic.core.settings.DateGroupMode
 import io.github.kurumi33.eropic.core.settings.RetentionOption
@@ -124,6 +125,10 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     fun setThemeMode(mode: ThemeMode) = viewModelScope.launch { settingsRepository.setThemeMode(mode) }
 
     fun setDynamicColor(enabled: Boolean) = viewModelScope.launch { settingsRepository.setDynamicColor(enabled) }
+
+    /** v1.1：切换界面语言（英文模式靠 ui/i18n/Translator 在渲染期翻译，不需要重启 Activity）。 */
+    fun setAppLanguage(language: AppLanguage) =
+        viewModelScope.launch { settingsRepository.setAppLanguage(language) }
 
     fun setGridColumns(columns: Int) = viewModelScope.launch { settingsRepository.setGridColumns(columns) }
 

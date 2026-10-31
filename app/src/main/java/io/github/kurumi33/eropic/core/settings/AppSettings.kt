@@ -58,6 +58,8 @@ enum class DateGroupMode(val label: String) {
 /** 用户可调的界面与行为设置（全部本地保存在 DataStore）。 */
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    /** v1.1：界面语言（跟随系统 / 简体中文 / English）。 */
+    val appLanguage: AppLanguage = AppLanguage.SYSTEM,
     val dynamicColor: Boolean = true,
     /** 图库网格列数，2~8（v0.6：顶栏加减按钮与设置页共用同一范围）。 */
     val gridColumns: Int = 4,

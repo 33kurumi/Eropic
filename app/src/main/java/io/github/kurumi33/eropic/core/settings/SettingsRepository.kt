@@ -18,6 +18,7 @@ class SettingsRepository(private val context: Context) {
 
     private object Keys {
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val APP_LANGUAGE = stringPreferencesKey("app_language")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val GRID_COLUMNS = intPreferencesKey("grid_columns")
         val SHOW_META = booleanPreferencesKey("show_meta")
@@ -42,6 +43,7 @@ class SettingsRepository(private val context: Context) {
         AppSettings(
             themeMode = prefs[Keys.THEME_MODE]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                 ?: defaults.themeMode,
+            appLanguage = AppLanguage.fromCode(prefs[Keys.APP_LANGUAGE]),
             dynamicColor = prefs[Keys.DYNAMIC_COLOR] ?: defaults.dynamicColor,
             gridColumns = (prefs[Keys.GRID_COLUMNS] ?: defaults.gridColumns)
                 .coerceIn(AppSettings.MIN_GRID_COLUMNS, AppSettings.MAX_GRID_COLUMNS),
@@ -71,6 +73,10 @@ class SettingsRepository(private val context: Context) {
     suspend fun setThemeMode(mode: ThemeMode) = context.settingsDataStore.edit { it[Keys.THEME_MODE] = mode.name }
 
     suspend fun setDynamicColor(enabled: Boolean) = context.settingsDataStore.edit { it[Keys.DYNAMIC_COLOR] = enabled }
+
+    /** v1.1：界面语言（存 code，读不到或非法时回落到跟随系统）。 */
+    suspend fun setAppLanguage(language: AppLanguage) =
+        context.settingsDataStore.edit { it[Keys.APP_LANGUAGE] = language.code }
 
     suspend fun setGridColumns(columns: Int) =
         context.settingsDataStore.edit {
