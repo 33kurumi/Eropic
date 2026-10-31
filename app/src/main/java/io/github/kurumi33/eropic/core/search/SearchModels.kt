@@ -1,6 +1,7 @@
 package io.github.kurumi33.eropic.core.search
 
 import io.github.kurumi33.eropic.core.query.SearchText
+import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 
 /**
  * 本地「以图搜图」的一条命中。
@@ -9,6 +10,10 @@ import io.github.kurumi33.eropic.core.query.SearchText
  * 也避免 Float/Double 混用后出现 0.9230000001 这种脏数据。
  * 同时保留 [dhashDistance] / [phashDistance] 两个原始距离：用户问「为什么这张排后面」时，
  * 详情页可以直接把两个距离摆出来，不用再反推。
+ *
+ * v1.0 起 [similarity] 来自多特征评分（[MultiFeatureSimilarity]），不再是单一哈希公式换算，
+ * 四个分项放在 [scores] 里；[scores] 为 null 表示这张图没走到精排（源图画像解码失败等），
+ * [similarity] 是旧的哈希公式粗算值，UI 照常显示即可。
  */
 data class SimilarImageHit(
     val mediaId: Long,
@@ -25,14 +30,17 @@ data class SimilarImageHit(
     val phashDistance: Int,
     /** 0.0..100.0 的综合相似度百分比，按它降序返回。 */
     val similarity: Double,
+    /** 多特征评分的四个分项；null 表示这条没精排，[similarity] 是哈希粗算值。 */
+    val scores: SimilarityScores? = null,
 )
 
 /**
  * 本地相似图查询参数。
  *
- * 三个参数都有默认值，UI 只暴露「关键词 + 最多几条」即可；
+ * UI 只暴露「关键词 + 最多几条」即可，其余都有默认值；
  * [maxDistance] 是 dHash 距离上限，默认 16（约等于「肉眼能看出是同一张」），
  * 放宽到 24 以上会开始混入同场景不同拍的照片。
+ * [minSimilarity] 是 v1.0 多特征评分的下限，见 [DEFAULT_MIN_SIMILARITY]。
  */
 data class SimilarityQuery(
     /**
@@ -43,12 +51,62 @@ data class SimilarityQuery(
     val limit: Int = DEFAULT_LIMIT,
     /** dHash 距离上限，会被夹到 0..64。 */
     val maxDistance: Int = DEFAULT_MAX_DISTANCE,
+    /**
+     * 最终相似度下限（0..100）：低于它的命中会被丢弃。
+     *
+     * 默认 [DEFAULT_MIN_SIMILARITY] = 0，即「不裁剪」——
+     * 现有 UI 还没有把设置页的 [SimilarityLevel] 传进来，默认裁剪会让用户
+     * 升级后突然看不到本来有的结果。调用方想启用档位时用 [atLevel] 构造查询即可。
+     */
+    val minSimilarity: Double = DEFAULT_MIN_SIMILARITY,
 ) {
     companion object {
         const val DEFAULT_LIMIT = 200
         const val MIN_LIMIT = 1
         const val MAX_LIMIT = 1000
         const val DEFAULT_MAX_DISTANCE = 16
+
+        /** 不裁剪：0 分也保留（哈希粗排的结果仍然按分数排序）。 */
+        const val DEFAULT_MIN_SIMILARITY = 0.0
+
+        /**
+         * 档位对应的相似度下限（经验值）。
+         *
+         * 标定方式：同一张图（缩放/压缩后）新评分通常在 95 以上；同角色不同图 70~88；
+         * 同场景非同图 55~70；毫不相关一般低于 50。所以：
+         * - 严格：85，只留「几乎肯定同源」的；
+         * - 标准：70，同角色不同图基本都在里面，杂图基本被挡掉；
+         * - 宽松：55，宁可多给候选，由用户自己判断。
+         * 这些数字与 [SimilarityLevel.dhashThreshold] 是两套口径：
+         * 前者管最终多特征分，后者管候选阶段的 dHash 粗筛。
+         */
+        const val STRICT_MIN_SIMILARITY = 85.0
+        const val STANDARD_MIN_SIMILARITY = 70.0
+        const val LOOSE_MIN_SIMILARITY = 55.0
+
+        /** 把设置页档位映射成相似度下限。 */
+        fun minSimilarityFor(level: SimilarityLevel): Double = when (level) {
+            SimilarityLevel.STRICT -> STRICT_MIN_SIMILARITY
+            SimilarityLevel.STANDARD -> STANDARD_MIN_SIMILARITY
+            SimilarityLevel.LOOSE -> LOOSE_MIN_SIMILARITY
+        }
+
+        /**
+         * 按设置页档位构造查询：粗筛距离用 [SimilarityLevel.dhashThreshold]，
+         * 最终下限用 [minSimilarityFor]。
+         *
+         * 为什么两个都取档位值：粗筛放太宽会让精排解码 200 张无关图（慢），
+         * 放太窄又会漏掉「颜色像但结构差」的同角色图；档位的 dhashThreshold
+         * 正是为「查重」标定的同源距离，直接借来做候选上限最省心。
+         * 注意：UI 目前仍用默认 [maxDistance]（16），档位尚未接线；
+         * 接线只需要把 ViewModel 里的 SimilarityQuery(...) 换成 SimilarityQuery.atLevel(level)。
+         */
+        fun atLevel(level: SimilarityLevel, keyword: String? = null): SimilarityQuery =
+            SimilarityQuery(
+                keyword = keyword,
+                maxDistance = level.dhashThreshold,
+                minSimilarity = minSimilarityFor(level),
+            )
     }
 }
 

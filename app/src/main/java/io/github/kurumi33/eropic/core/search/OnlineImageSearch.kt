@@ -84,14 +84,11 @@ class OnlineImageSearch(
         ReverseImageProvider.GOOGLE_LENS -> googleLens(bytes, mime)
         ReverseImageProvider.BAIDU -> baidu(bytes, mime)
         ReverseImageProvider.SAUCENAO -> sauceNao(bytes, mime)
-        // 以下四家没有匿名 multipart 上传入口，只能把图片放到公网再拼 URL（见 ImageHost）
-        ReverseImageProvider.ASCII2D -> urlSearch(provider, bytes, mime) { publicUrl ->
-            // PicImageSearch 的 ascii2d 是 POST /search/file；它同时提供 GET /search/url/<url>（不经表单）
-            ASCII2D_URL_SEARCH_PREFIX + Uri.encode(publicUrl, "/:")
-        }
-        ReverseImageProvider.IQDB -> urlSearch(provider, bytes, mime) { publicUrl ->
-            iqdbUrl(publicUrl)
-        }
+        // ascii2d / IQDB 都支持 multipart 直传（PicImageSearch 用的就是这条），
+        // 直传能成就不必经过图床 —— 图床正是 v0.9 在用户手机上失败的那一环。
+        ReverseImageProvider.ASCII2D -> ascii2d(bytes, mime)
+        ReverseImageProvider.IQDB -> iqdb(bytes, mime)
+        // onegai / Lenso 只收公网 URL，没有匿名上传入口，只能经图床中转（见 ImageHost）
         ReverseImageProvider.ONEGAI -> urlSearch(provider, bytes, mime) { publicUrl ->
             "https://onegai.moe/search?url=" + Uri.encode(publicUrl, "/:")
         }
@@ -113,18 +110,130 @@ class OnlineImageSearch(
         mime: String,
         buildUrl: (String) -> String,
     ): OnlineSearchResult {
-        val publicUrl = imageHost.upload(bytes, mime)
+        val upload = imageHost.uploadDetailed(bytes, mime)
+        val publicUrl = upload.url
             ?: return failed(
                 provider,
-                provider.label + " 只接受公网图片链接，而临时图床上传失败了；" +
-                    "请检查网络后重试（国内访问 catbox 系列通常需要代理）",
+                provider.label + " 只接受公网图片链接，而所有临时图床都上传失败了（" +
+                    upload.attempted.joinToString("；") +
+                    "）。这类引擎必须先把图放到公网，通常是网络到不了图床；" +
+                    "可挂代理后重试，或改用百度识图 / ascii2d / IQDB（它们收文件本体，不需要图床）",
             )
         return OnlineSearchResult(
             provider = provider,
             ok = true,
             resultUrl = buildUrl(publicUrl),
-            message = "已把源图上传到临时图床（1 小时后自动删除），结果页在浏览器里打开",
+            message = "已把源图上传到临时图床（会自动过期删除），结果页在浏览器里打开",
         )
+    }
+
+    /** multipart 直传拿到的一张结果页（HTML + 跟随重定向后的最终地址）。 */
+    private data class HtmlPage(val html: String, val finalUrl: String)
+
+    /**
+     * 用 multipart 把图片直接 POST 给某家，拿回结果页 HTML。
+     *
+     * 直传的好处：不经过第三方图床，少一个失败点，也不会把图片给别人托管。
+     * ascii2d / IQDB 都支持这条（PicImageSearch 各引擎里用的就是 file 字段）。
+     * okhttp 默认跟随重定向，所以 ascii2d 的 302 会自己落到 /search/color/<hash>。
+     */
+    private fun postImageForHtml(
+        url: String,
+        fieldName: String,
+        bytes: ByteArray,
+        mime: String,
+        referer: String? = null,
+    ): HtmlPage? {
+        val parsed = url.toHttpUrlOrNull() ?: return null
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(fieldName, IMAGE_FILE_NAME, bytes.toRequestBody(mime.toMediaType()))
+            .build()
+        return post(parsed, body, referer = referer).use { response ->
+            if (!response.isSuccessful) return@use null
+            HtmlPage(response.body?.string().orEmpty(), response.request.url.toString())
+        }
+    }
+
+    /**
+     * ascii2d（对照 PicImageSearch/engines/ascii2d.py）。
+     *
+     * POST https://ascii2d.net/search/file，字段 file；成功后 302 到 /search/color/<hash>，
+     * 页面里 div.item-box 是命中条目（OnlineParsers.ascii2dHtml 解析）。
+     * 判定成功的条件就是「最终地址进了 /search/color 或 /search/bovw」——
+     * v0.6 只判断 URL 里有没有 uri= 参数，把成功也当失败，用户看到的就是「没有结果」。
+     *
+     * 直传失败（网络/服务改版）才退回图床 + GET /search/url/<公网链接>。
+     */
+    private suspend fun ascii2d(bytes: ByteArray, mime: String): OnlineSearchResult {
+        val provider = ReverseImageProvider.ASCII2D
+        val page = runCatching {
+            postImageForHtml(
+                url = "https://ascii2d.net/search/file",
+                fieldName = "file",
+                bytes = bytes,
+                mime = mime,
+                referer = "https://ascii2d.net/",
+            )
+        }.getOrNull()
+        if (page != null) {
+            val items = OnlineParsers.ascii2dHtml(page.html, page.finalUrl)
+            val reachedResult = page.finalUrl.contains("/search/color") || page.finalUrl.contains("/search/bovw")
+            if (items.isNotEmpty()) {
+                return OnlineSearchResult(
+                    provider = provider,
+                    ok = true,
+                    resultUrl = page.finalUrl,
+                    items = items.toOnlineHits(),
+                    message = "ascii2d 返回 " + items.size + " 个匹配，也可在浏览器查看完整结果页",
+                )
+            }
+            if (reachedResult) {
+                return OnlineSearchResult(
+                    provider = provider,
+                    ok = true,
+                    resultUrl = page.finalUrl,
+                    message = "ascii2d 已生成结果页（没有解析出条目），在浏览器里打开查看",
+                )
+            }
+        }
+        return urlSearch(provider, bytes, mime) { publicUrl ->
+            ASCII2D_URL_SEARCH_PREFIX + Uri.encode(publicUrl, "/:")
+        }
+    }
+
+    /**
+     * IQDB（对照 PicImageSearch/engines/iqdb.py）。
+     *
+     * POST https://iqdb.org/，字段 file；响应**直接就是结果页 HTML**（不重定向），
+     * 用 OnlineParsers.iqdbHtml 解析表格里的相似度 / 来源站 / 链接。
+     *
+     * 注意 v0.6 的坑：当时把重定向后的地址当结果页交给浏览器，用户看到的是 IQDB 首页。
+     * 现在优先在 App 内展示解析结果，只有在直传失败时才退回图床 + ?url= 模式。
+     */
+    private suspend fun iqdb(bytes: ByteArray, mime: String): OnlineSearchResult {
+        val provider = ReverseImageProvider.IQDB
+        val page = runCatching {
+            postImageForHtml(
+                url = "https://iqdb.org/",
+                fieldName = "file",
+                bytes = bytes,
+                mime = mime,
+                referer = "https://iqdb.org/",
+            )
+        }.getOrNull()
+        if (page != null) {
+            val items = OnlineParsers.iqdbHtml(page.html, page.finalUrl)
+            if (items.isNotEmpty()) {
+                return OnlineSearchResult(
+                    provider = provider,
+                    ok = true,
+                    items = items.toOnlineHits(),
+                    message = "IQDB 返回 " + items.size + " 个匹配",
+                )
+            }
+        }
+        return urlSearch(provider, bytes, mime) { publicUrl -> iqdbUrl(publicUrl) }
     }
 
     /**
@@ -143,7 +252,8 @@ class OnlineImageSearch(
      */
     private suspend fun googleLens(bytes: ByteArray, mime: String): OnlineSearchResult {
         val provider = ReverseImageProvider.GOOGLE_LENS
-        val publicUrl = imageHost.upload(bytes, mime)
+        val upload = imageHost.uploadDetailed(bytes, mime)
+        val publicUrl = upload.url
         if (publicUrl != null) {
             return OnlineSearchResult(
                 provider = provider,
@@ -239,7 +349,7 @@ class OnlineImageSearch(
      *
      * 上传体积：网页端上限只有几 MB，手机原图常有 3-10MB，超过阈值先在本地缩到 1600 长边再传。
      */
-    private fun sauceNao(bytes: ByteArray, mime: String): OnlineSearchResult {
+    private suspend fun sauceNao(bytes: ByteArray, mime: String): OnlineSearchResult {
         val provider = ReverseImageProvider.SAUCENAO
         // v0.6：key 内置在代码里（用户自己的账号），设置页不再有输入框，也不用再判断"未配置"
         val apiKey = SAUCE_NAO_API_KEY
@@ -274,16 +384,32 @@ class OnlineImageSearch(
             val parsed = OnlineParsers.sauceNao(text)
             val items = parsed.results.toOnlineHits()
             val returned = ReverseSearchParsers.sauceNaoResultsReturned(text) ?: parsed.results.size
-            return if (items.isEmpty()) {
-                failed(
+            if (items.isEmpty()) {
+                // v1.0.0：用户的原话是「SauceNAO 应该返回它的搜索结果页面」。
+                // API 的 JSON 里确实没有可复用的结果页链接，但网页版接受 ?url=<公网图片链接>，
+                // 所以先试一次图床；换到链接就打开网页版结果页（和浏览器里手动搜一样），
+                // 图床不通时再退回纯文字提示。
+                val upload = imageHost.uploadDetailed(payload, payloadMime)
+                val publicUrl = upload.url
+                if (publicUrl != null) {
+                    return OnlineSearchResult(
+                        provider = provider,
+                        ok = true,
+                        resultUrl = "https://saucenao.com/search.php?url=" + Uri.encode(publicUrl, "/:"),
+                        message = "SauceNAO 的 API 没有返回条目，已改用网页版结果页（临时图片会在图床上自动过期）",
+                    )
+                }
+                return failed(
                     provider,
                     if (returned <= 0) {
                         "SauceNAO 没有找到相似来源，可换一张更清晰的图，或到 saucenao.com 手动检索"
                     } else {
-                        "SauceNAO 报告有 " + returned + " 个结果，但解析后没有可展示条目（接口可能已变更）"
+                        "SauceNAO 报告有 " + returned + " 个结果，但解析后没有可展示条目（接口可能已变更），" +
+                            "网页版结果页也打不开：" + upload.attempted.joinToString("；")
                     },
                 )
-            } else {
+            }
+            return run {
                 OnlineSearchResult(
                     provider = provider,
                     ok = true,

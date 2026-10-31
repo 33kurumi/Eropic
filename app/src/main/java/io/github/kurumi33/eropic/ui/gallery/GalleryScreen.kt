@@ -36,6 +36,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
@@ -84,6 +85,43 @@ fun GalleryScreen(
     // 网格直接用原始照片流：日期标题行由 GalleryDisplayGrid 按当前"显示方式"动态生成，
     // 这样标题行才能点击折叠（旧的 viewModel.galleryRows 把标题写死在分页数据里，删不掉也折叠不了）。
     val pagingItems = viewModel.media.collectAsLazyPagingItems()
+
+    // 分组张数：必须来自数据库聚合（GROUP BY），不能数网格里"已加载"的行。
+    // 分页首屏只加载几十条，用已加载行数当标题时，打开图库就会看到
+    // 「2026年10月 · 800 张」（实际几千张），还得手动展开/收起一次触发行重建才变对（v1.0.0 缺陷）。
+    // key 覆盖所有会影响聚合结果的输入：
+    // - 显示方式：按月/按日是不同的分组键（"2026-10" 与 "2026-10-28"）；
+    // - 只看收藏：聚合要跟着收藏筛选走；
+    // - indexState.finishedAtMs：后台增量同步会新增/删除照片，完成后要重算；
+    // - count：删除、移入回收站/恢复等写操作不改 finishedAtMs，但会改总张数。
+    // - 收藏总数（仅「只看收藏」时有效）：收藏不改变总张数 count，
+    //   所以在收藏筛选下取消/添加收藏后，光靠 count 不会刷新分组张数。
+    //   没开筛选时把这一维固定成 0，避免每次点赞都白算一次聚合查询。
+    // 注意 produceState 在 key 变化时先保留旧值再异步刷新，所以标题不会闪成空/0。
+    val favoriteCount by viewModel.favoriteCount.collectAsStateWithLifecycle()
+    val favoriteStatsKey = if (favoritesOnly) favoriteCount else 0
+    val groupCounts by produceState<Map<String, Long>>(
+        initialValue = emptyMap(),
+        settings.dateGroupMode,
+        favoritesOnly,
+        indexState.finishedAtMs,
+        count,
+        favoriteStatsKey,
+    ) {
+        val mode = settings.dateGroupMode
+        // 不分组时没有标题行，不必查库（也避免切换档位时白算一次聚合）。
+        value = if (mode == DateGroupMode.NONE) {
+            emptyMap()
+        } else {
+            runCatching {
+                viewModel.galleryGroupStats(
+                    byDay = mode == DateGroupMode.DAY,
+                    favoritesOnly = favoritesOnly,
+                ).associate { stat -> stat.key to stat.itemCount }
+            }.getOrDefault(emptyMap())
+        }
+    }
+
     // 捏合改列数只覆盖本次浏览，不回写设置。
     var columnOverride by remember { mutableStateOf<Int?>(null) }
     // 列数范围与 SettingsRepository 完全一致（v0.6 起 2..8；两边都引用 AppSettings 常量）
@@ -161,6 +199,8 @@ fun GalleryScreen(
         } else {
             EropicTopBar(
                 title = "图库",
+                // v1.0：v1.0 顶上移——图库顶栏用 48dp 紧凑标题行，把高度还给网格。
+                compactHeight = true,
                 subtitle = if (settings.showMeta) {
                     formatCount(count) + " 张 · " + formatBytes(totalSize)
                 } else {
@@ -389,6 +429,8 @@ fun GalleryScreen(
                     thumbnailProvider = { item -> viewModel.thumbnailFile(item) },
                     onColumnsChange = { columnOverride = it },
                     onVisibleGroupKeys = { visibleGroupKeys = it },
+                    // 标题张数用全库聚合结果（首屏即正确），查不到的键在网格里退回已加载张数。
+                    groupCounts = groupCounts,
                     onClick = { item ->
                         if (selectionActive) {
                             selectedIds = if (item.id in selectedIds) {

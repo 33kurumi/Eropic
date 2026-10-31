@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
+import io.github.kurumi33.eropic.core.hash.Hashing
 import io.github.kurumi33.eropic.core.hash.ImageSignature
 import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.core.thumb.BitmapDecoder
@@ -26,9 +27,12 @@ import kotlinx.coroutines.withContext
  * 3. 全程只读：搜索绝不写库（连「顺手把算好的指纹存回去」都不做）。
  *    指纹由索引任务统一维护，搜索时临时算的指纹若写库，会把 signatureVersion 的语义搅乱。
  *
- * v0.7 起多了两层能力（用户要求「本地识图的算法还需要改进，重点是二次元图」）：
- * - **颜色画像精排**：哈希只描述结构，二次元图换配色后距离会很大。对哈希粗筛出来的前 [REFINE_LIMIT] 条
- *   再解码一次算 [ColorProfile]，用 [VisualSimilarity.combinedScore] 重排。
+ * v1.0 起本地相似度换成「多特征评分」（用户反馈「本地识图的算法也不好」）：
+ * - **候选**：用 dHash + hash_band 倒排取候选（见 [candidateIdsByBands]），不再全表扫描；
+ *   倒排缺失（旧索引）或距离上限超出倒排覆盖范围时退回 id 键集分页扫描，保证正确性。
+ * - **精排**：对粗排分数最高的 [REFINE_LIMIT] 条再解码一次算 [ImageFeatures]
+ *   （256 位 pHash + 4x4 颜色布局 + 24 桶色相直方图 + 边缘密度 + 长宽比），
+ *   用 [MultiFeatureSimilarity.compare] 给出 0..100 的新分数与四个可解释分项。
  *   为什么只精排前 N 条：解码是全流程最贵的操作，全库精排等于把「以图搜图」变成几分钟的任务。
  * - **找同角色**：先联网问 SauceNAO / ascii2d「这是谁」，把 data.characters / material / title
  *   拆成角色名候选并加权投票（[CharacterRecognizer]），配合本地颜色/结构相似度给出候选集
@@ -239,17 +243,17 @@ class ImageSearchRepository(
     private suspend fun signatureOf(item: MediaEntity): SourceSignature? {
         val dhash = item.dhash
         if (dhash != null) {
-            // 指纹在库里，但颜色画像没存过，精排需要源图画像时只能现解码一次（最多少 30ms）
-            return SourceSignature(dhash = dhash, phash = item.phash, profile = profileOfEntity(item))
+            // 指纹在库里，但多特征画像没存过，精排需要源图画像时只能现解码一次（缩略图命中时更快）
+            return SourceSignature(dhash = dhash, phash = item.phash, features = featuresOfEntity(item))
         }
         return computeSignature(MediaUris.of(item.id))
     }
 
     /**
-     * 现场解码算指纹 + 颜色画像。
+     * 现场解码算指纹 + 多特征画像。
      *
      * 不复用 [io.github.kurumi33.eropic.core.index.SignatureGenerator]：那个类会顺带写缩略图缓存（有副作用），
-     * 而且需要 ThumbnailCache 依赖；搜索只需要「解码 → 算指纹」这两步，直接用底层两个工具类更干净。
+     * 而且需要 ThumbnailCache 依赖；搜索只需要「解码 → 算指纹」这两步，直接用底层工具类更干净。
      */
     private suspend fun computeSignature(uri: Uri): SourceSignature? {
         val bitmap = BitmapDecoder.decode(contentResolver, uri, ImageSignature.DECODE_LONG_EDGE) ?: return null
@@ -258,39 +262,47 @@ class ImageSearchRepository(
                 SourceSignature(
                     dhash = it.dhash,
                     phash = it.phash,
-                    profile = runCatching { VisualSimilarity.profile(bitmap) }.getOrNull(),
+                    features = runCatching { BitmapFeatures.extract(bitmap) }.getOrNull(),
                 )
             }
         } finally {
-            // compute 已经把像素读完了；及时回收，避免后面整库扫描时和候选实体抢内存
+            // 指纹和画像都已经算完；及时回收，避免后面扫描候选时和候选实体抢内存
             bitmap.recycle()
         }
     }
 
-    /** 候选图的颜色画像：优先用缩略图（小、读起来快），没有缓存再解码原图。 */
-    private suspend fun profileOfEntity(item: MediaEntity): ColorProfile? {
+    /** 候选图的多特征画像：优先用缩略图（小、读起来快），没有缓存再解码原图。 */
+    private suspend fun featuresOfEntity(item: MediaEntity): ImageFeatures? {
         val cached = thumbnailCache?.existing(item)?.takeIf { it.exists() }
-        val bitmap = decodeForProfile(item, cached) ?: return null
+        val bitmap = decodeForFeatures(item, cached) ?: return null
         return try {
-            VisualSimilarity.profile(bitmap)
+            BitmapFeatures.extract(bitmap)
         } catch (e: Exception) {
+            // 单张图解码/计算失败不应该让整次搜索失败：这张图保留粗排分数即可
             null
         } finally {
             bitmap.recycle()
         }
     }
 
-    private suspend fun decodeForProfile(item: MediaEntity, cached: java.io.File?): Bitmap? {
+    private suspend fun decodeForFeatures(item: MediaEntity, cached: java.io.File?): Bitmap? {
         val localUri = cached?.let { Uri.fromFile(it) }
         if (localUri != null) {
-            BitmapDecoder.decode(contentResolver, localUri, PROFILE_EDGE)?.let { return it }
+            BitmapDecoder.decode(contentResolver, localUri, FEATURE_EDGE)?.let { return it }
         }
-        return BitmapDecoder.decode(contentResolver, MediaUris.of(item.id), PROFILE_EDGE)
+        return BitmapDecoder.decode(contentResolver, MediaUris.of(item.id), FEATURE_EDGE)
     }
 
     /**
-     * 按 id 键集分页扫全库，边扫边算距离，用小顶堆维护 Top-N。
+     * 收集候选并精排。
      *
+     * 候选有两条路：
+     * 1. **倒排**：用 hash_band（4 个 16 bit band）按鸽笼原理取「至少一个 band 与源图足够接近」的 id，
+     *    复杂度约 O(命中候选数) 而不是 O(库大小)。
+     * 2. **兜底全表扫描**：倒排不可用时（距离上限超出倒排覆盖范围，或库里根本没有 band 行——
+     *    hash_band 是 v0.7 才写入的，老索引没有回填）退回 id 键集分页扫描。宁可慢，不能搜不到。
+     *
+     * 无论走哪条路，候选都先按 dHash 距离粗筛（便宜），再对分数最高的一批做多特征精排（贵）。
      * [excludeId] 传 [EXCLUDE_NONE] 表示不排除任何行。
      */
     private suspend fun scan(
@@ -301,97 +313,163 @@ class ImageSearchRepository(
         val maxDistance = SimilarityMath.clampDistance(query.maxDistance)
         val limit = SimilarityMath.clampLimit(query.limit)
         val keyword = query.keyword?.trim()?.takeIf { it.isNotEmpty() }
+        // 候选池至少要有精排条数：只留 limit 条会让「粗排一般、精排其实很像」的图进不了精排
+        val poolSize = maxOf(limit, REFINE_LIMIT)
 
-        // 堆顶 = 当前最差的一条（相似度最低；同分时拍摄时间更早的算更差）。
-        // 超过 limit 就弹堆顶，最终堆里就是 Top-N，内存 O(limit)。
+        // 堆顶 = 当前最差的一条（相似度最低；同分时拍摄时间更早的算更差），超过容量就弹掉，
+        // 最终堆里就是粗排 Top-N，内存 O(poolSize)。
         val worstFirst = PriorityQueue<SimilarImageHit>(
-            limit + 1,
+            poolSize + 1,
             compareBy<SimilarImageHit> { it.similarity }.thenBy { it.dateTakenMs },
         )
 
-        var afterId = 0L
-        while (true) {
-            val batch = mediaDao.pagePresentItems(afterId, PAGE_SIZE)
-            if (batch.isEmpty()) break
-            for (item in batch) {
-                val candidateDhash = item.dhash ?: continue
-                if (item.id == excludeId) continue
-                if (keyword != null &&
-                    !SimilarityMath.matchesKeyword(item.displayName, item.relativePath, keyword)
-                ) {
-                    continue
+        val candidateIds = candidateIdsByBands(source.dhash, maxDistance)
+        if (candidateIds != null) {
+            // byIds 用 IN 查询，分批避免一条 SQL 的变量数超过 SQLite 上限
+            for (chunk in candidateIds.chunked(SQL_IN_LIMIT)) {
+                for (item in mediaDao.byIds(chunk)) {
+                    offerCandidate(worstFirst, poolSize, item, excludeId, keyword, maxDistance, source)
                 }
-                val dhashDistance = SimilarityMath.hammingDistance(source.dhash, candidateDhash)
-                // 先用 dHash 做粗筛：dHash 对「结构相同」最灵敏，绝大多数行在这一步就被排除，
-                // 后面才轮到稍贵的 pHash 计算
-                if (dhashDistance > maxDistance) continue
-
-                val candidatePhash = item.phash
-                val sourcePhash = source.phash
-                // 缺 pHash 时退化成纯 dHash 计分（两个权重和为 1），并把 phashDistance 记成 dhashDistance，
-                // 保证 UI 展示的两个距离和 similarity 是同一套口径
-                val phashDistance = if (sourcePhash != null && candidatePhash != null) {
-                    SimilarityMath.hammingDistance(sourcePhash, candidatePhash)
-                } else {
-                    dhashDistance
-                }
-
-                worstFirst.add(
-                    SimilarImageHit(
-                        mediaId = item.id,
-                        displayName = item.displayName,
-                        relativePath = item.relativePath,
-                        sizeBytes = item.sizeBytes,
-                        width = item.width,
-                        height = item.height,
-                        mimeType = item.mimeType,
-                        dateTakenMs = item.dateTakenMs,
-                        dhashDistance = dhashDistance,
-                        phashDistance = phashDistance,
-                        similarity = SimilarityMath.similarity(dhashDistance, phashDistance),
-                    ),
-                )
-                if (worstFirst.size > limit) worstFirst.poll()
             }
-            afterId = batch.last().id
-            // 补齐最后一批：pagePresentItems 按 id 升序，不足一批说明已经到底
-            if (batch.size < PAGE_SIZE) break
+        } else {
+            var afterId = 0L
+            while (true) {
+                val batch = mediaDao.pagePresentItems(afterId, PAGE_SIZE)
+                if (batch.isEmpty()) break
+                for (item in batch) {
+                    offerCandidate(worstFirst, poolSize, item, excludeId, keyword, maxDistance, source)
+                }
+                afterId = batch.last().id
+                // pagePresentItems 按 id 升序，不足一批说明已经到底
+                if (batch.size < PAGE_SIZE) break
+            }
         }
 
-        val base = worstFirst.sortedWith(
+        val coarse = worstFirst.sortedWith(
             compareByDescending<SimilarImageHit> { it.similarity }.thenByDescending { it.dateTakenMs },
         )
-        return refineWithColor(base, source.profile)
+        val refined = refineWithFeatures(coarse, source.features, limit)
+        // 下限放在精排之后裁剪：粗排的哈希分与多特征分不是同一套口径，先裁会把真正的同角色图裁掉
+        return if (query.minSimilarity <= 0.0) {
+            refined
+        } else {
+            refined.filter { it.similarity >= query.minSimilarity }
+        }
     }
 
     /**
-     * 颜色画像精排：只对基础分最高的前 [REFINE_LIMIT] 条解码算画像，然后用综合分重排。
+     * 把一条候选放进小顶堆（粗排）。
      *
-     * 源图没有有效画像（解码失败、全透明）时直接返回基础分结果 —— 精排是「加分项」，不是必需品。
+     * 这里只算便宜的特征（dHash / pHash 距离），多特征精排留给 [refineWithFeatures]。
      */
-    private suspend fun refineWithColor(
+    private fun offerCandidate(
+        worstFirst: PriorityQueue<SimilarImageHit>,
+        poolSize: Int,
+        item: MediaEntity,
+        excludeId: Long,
+        keyword: String?,
+        maxDistance: Int,
+        source: SourceSignature,
+    ) {
+        val candidateDhash = item.dhash ?: return
+        if (item.id == excludeId) return
+        if (keyword != null && !SimilarityMath.matchesKeyword(item.displayName, item.relativePath, keyword)) {
+            return
+        }
+        val dhashDistance = SimilarityMath.hammingDistance(source.dhash, candidateDhash)
+        // 先用 dHash 做粗筛：它对「结构相同」最灵敏，绝大多数行在这一步就被排除
+        if (dhashDistance > maxDistance) return
+
+        val candidatePhash = item.phash
+        val sourcePhash = source.phash
+        // 缺 pHash 时退化成纯 dHash 计分（两个权重和为 1），并把 phashDistance 记成 dhashDistance，
+        // 保证 UI 展示的两个距离和 similarity 是同一套口径
+        val phashDistance = if (sourcePhash != null && candidatePhash != null) {
+            SimilarityMath.hammingDistance(sourcePhash, candidatePhash)
+        } else {
+            dhashDistance
+        }
+
+        worstFirst.add(
+            SimilarImageHit(
+                mediaId = item.id,
+                displayName = item.displayName,
+                relativePath = item.relativePath,
+                sizeBytes = item.sizeBytes,
+                width = item.width,
+                height = item.height,
+                mimeType = item.mimeType,
+                dateTakenMs = item.dateTakenMs,
+                dhashDistance = dhashDistance,
+                phashDistance = phashDistance,
+                similarity = SimilarityMath.similarity(dhashDistance, phashDistance),
+            ),
+        )
+        if (worstFirst.size > poolSize) worstFirst.poll()
+    }
+
+    /**
+     * 用 hash_band 倒排取候选 id；返回 null 表示「倒排不可用」，调用方退回全表扫描。
+     *
+     * 鸽笼原理：dHash 距离 d ≤ maxDistance 时，4 个 band 里至少有一个 band 的距离 ≤ maxDistance/4，
+     * 所以只需要查「每个 band 与源图 band 距离 ≤ radius」的 id，不会漏召回。
+     * radius 越大候选越多（radius 4 时每 band 2517 个值），候选量约全库 10~15%，仍远小于全表。
+     *
+     * 为什么要返回 null 而不是空列表：库里没有 band 行（老索引）和「真的没有相似图」
+     * 在 SQL 结果上都是空列表，但前者必须兜底全表扫描，否则升级后老用户会搜不到任何图。
+     */
+    private suspend fun candidateIdsByBands(sourceDhash: Long, maxDistance: Int): List<Long>? {
+        if (maxDistance > BAND_MAX_DISTANCE) return null
+        val bandDao = database.hashBandDao()
+        val radius = CandidateBands.radiusFor(maxDistance)
+        val ids = LinkedHashSet<Long>(512)
+        for (bandNo in 0 until Hashing.BAND_COUNT) {
+            val neighbors = CandidateBands.neighbors(Hashing.band(sourceDhash, bandNo), radius)
+            for (chunk in neighbors.toList().chunked(SQL_IN_LIMIT)) {
+                ids.addAll(bandDao.candidates(bandNo, chunk))
+            }
+        }
+        return ids.takeIf { it.isNotEmpty() }?.toList()
+    }
+
+    /**
+     * 多特征精排：对粗排最靠前的 [REFINE_LIMIT] 条解码算 [ImageFeatures]，
+     * 用 [MultiFeatureSimilarity.compare] 覆盖 similarity 并带上分项分数。
+     *
+     * 源图没有画像（解码失败）时直接返回粗排结果——精排是「加分项」，不是必需品。
+     * 超出 [REFINE_LIMIT] 的尾部保留粗排分数：它们本来就不可能进入用户视野，解码纯属浪费。
+     */
+    private suspend fun refineWithFeatures(
         hits: List<SimilarImageHit>,
-        sourceProfile: ColorProfile?,
+        sourceFeatures: ImageFeatures?,
+        limit: Int,
     ): List<SimilarImageHit> {
-        if (hits.size < 2) return hits
-        if (sourceProfile == null || sourceProfile.aspectRatio <= 0.0) return hits
-        val head = hits.take(REFINE_LIMIT)
-        val refined = HashMap<Long, Double>(head.size)
-        for (hit in head) {
-            val entity = runCatching { mediaDao.byId(hit.mediaId) }.getOrNull() ?: continue
-            val candidate = runCatching { profileOfEntity(entity) }.getOrNull() ?: continue
-            if (candidate.aspectRatio <= 0.0) continue
-            refined[hit.mediaId] = VisualSimilarity.combinedScore(
-                dhashDist = hit.dhashDistance,
-                phashDist = hit.phashDistance,
-                base = sourceProfile,
+        if (hits.isEmpty()) return emptyList()
+        if (sourceFeatures == null) return hits.take(limit)
+        val refined = ArrayList<SimilarImageHit>(hits.size)
+        hits.forEachIndexed { index, hit ->
+            // 粗排都进不了前 REFINE_LIMIT 的图，精排也翻不了身：保留粗分，省一次解码
+            if (index >= REFINE_LIMIT) {
+                refined += hit
+                return@forEachIndexed
+            }
+            val entity = runCatching { mediaDao.byId(hit.mediaId) }.getOrNull()
+            val candidate = entity?.let { runCatching { featuresOfEntity(it) }.getOrNull() }
+            if (candidate == null) {
+                // 单张图取不到（文件被删/读失败）：保留粗分，不影响其它命中
+                refined += hit
+                return@forEachIndexed
+            }
+            val scores = MultiFeatureSimilarity.compare(
+                phash64Distance = hit.phashDistance,
+                base = sourceFeatures,
                 candidate = candidate,
             )
+            refined += hit.copy(similarity = scores.total, scores = scores)
         }
-        if (refined.isEmpty()) return hits
-        return hits
-            .map { hit -> refined[hit.mediaId]?.let { hit.copy(similarity = it) } ?: hit }
+        return refined
             .sortedWith(compareByDescending<SimilarImageHit> { it.similarity }.thenByDescending { it.dateTakenMs })
+            .take(limit)
     }
 
     /** 把库内实体包装成「源图」命中，供 UI 显示「识别依据」。 */
@@ -409,11 +487,11 @@ class ImageSearchRepository(
         similarity = 100.0,
     )
 
-    /** 源图指纹 + 可选颜色画像。 */
+    /** 源图指纹 + 可选多特征画像（画像缺失时只能按哈希粗排）。 */
     private data class SourceSignature(
         val dhash: Long,
         val phash: Long?,
-        val profile: ColorProfile? = null,
+        val features: ImageFeatures? = null,
     )
 
     /** 一次联网得到的角色证据；[tried] 表示确实发出过请求（即使没结果）。 */
@@ -430,11 +508,29 @@ class ImageSearchRepository(
         /** MediaStore 的 id 都是正数，用 -1 表示「不排除任何行」。 */
         const val EXCLUDE_NONE = -1L
 
-        /** 颜色精排的条数上限：每条要多解码一次，60 条约 1-2 秒（缩略图命中时更快）。 */
-        const val REFINE_LIMIT = 60
+        /**
+         * 多特征精排的条数上限：每条要多解码一次。
+         * 200 条在缩略图命中时约 1-2 秒；再往上加，耗时线性增长而结果基本不变。
+         */
+        const val REFINE_LIMIT = 200
 
-        /** 算颜色画像时的解码长边：64 已足够描述配色与线条密度（与 VisualSimilarity 的采样一致）。 */
-        const val PROFILE_EDGE = 64
+        /**
+         * 精排时的解码长边：64 与 [MultiFeatureSimilarity] 的采样尺寸一致。
+         * 解码更大没有意义（内部会缩到 64），只会多花内存。
+         */
+        const val FEATURE_EDGE = 64
+
+        /**
+         * 单条 SQL 的 IN 参数上限。
+         * SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER 是 999，这里留一半余量，避免不同 ROM 上限更小。
+         */
+        const val SQL_IN_LIMIT = 500
+
+        /**
+         * 倒排用的最大 dHash 距离：4 个 band × 每 band 最多差 4 位 = 16。
+         * 超过这个距离，鸽笼原理不再保证「必有某 band 落在 radius 内」，必须退回全表扫描。
+         */
+        const val BAND_MAX_DISTANCE = 16
 
         /** 「找同角色」的候选宽度。 */
         const val CHARACTER_CANDIDATES = 120

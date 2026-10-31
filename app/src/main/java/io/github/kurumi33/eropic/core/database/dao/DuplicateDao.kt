@@ -57,6 +57,10 @@ interface DuplicateDao {
     @Query("SELECT * FROM duplicate_group ORDER BY reclaimableBytes DESC")
     fun groupsFlow(): Flow<List<DuplicateGroupEntity>>
 
+    /** 分组总数：诊断日志里用（只报数量，不含任何路径）。 */
+    @Query("SELECT COUNT(*) FROM duplicate_group")
+    suspend fun count(): Int
+
     @Query("SELECT m.* FROM media_item m INNER JOIN duplicate_member d ON m.id = d.mediaId WHERE d.groupId = :groupId ORDER BY m.sizeBytes DESC")
     suspend fun members(groupId: Long): List<io.github.kurumi33.eropic.core.database.entity.MediaEntity>
 }

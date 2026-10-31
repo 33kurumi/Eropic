@@ -1,5 +1,12 @@
 package io.github.kurumi33.eropic.ui.cleanup
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,7 +39,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -44,7 +53,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -328,12 +342,36 @@ fun CleanupScreen(
         )
     }
 
+    // 分类 chips 随列表上滑收起、回顶再滑回（与文件夹详情页顶部的做法一致，图库顶部同款体验）。
+    // 这里用嵌套滚动累计「离顶部滚了多远」：向上滚超过 40dp 收起，回到顶部累计值归零后重新出现。
+    // 刻意不看 isScrollInProgress —— 那样滑到中间停住时 chips 会莫名其妙又冒出来。
+    val hideThresholdPx = with(LocalDensity.current) { 40.dp.toPx() }
+    var scrolledPx by remember { mutableFloatStateOf(0f) }
+    val chipsVisible by remember(hideThresholdPx) {
+        derivedStateOf { scrolledPx < hideThresholdPx }
+    }
+    val chipsScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                // consumed.y < 0：内容往上走（正在往下翻）；> 0：正在回顶。
+                scrolledPx = (scrolledPx - consumed.y).coerceAtLeast(0f)
+                return Offset.Zero
+            }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         EropicTopBar(
             title = "清理",
             subtitle = overview?.let {
                 "${it.categoryCount} 类问题 · 可释放 ${formatBytes(it.bytes)}"
             },
+            // v1.0：主页用紧凑顶栏（48dp），整页顶部整体上移，和分类 chips 收起的方向一致。
+            compactHeight = true,
             actions = {
                 IconButton(onClick = { viewModel.openScreen(AppScreen.Trash) }) {
                     Icon(imageVector = Icons.Filled.Delete, contentDescription = "回收站")
@@ -354,117 +392,136 @@ fun CleanupScreen(
             },
         )
 
-        LazyRow(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        // 顶部「索引与查重」卡：固定显示在分类 chips 之上，不参与列表滚动。
+        // v0.9 重写时这张卡被塞进了 LazyColumn 里，用户反馈「顶部的框没了」，这里恢复成固定卡片。
+        IndexCard(
+            indexState = indexState,
+            onStart = viewModel::startIndex,
+            onCancel = viewModel::cancelIndex,
+            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp),
+        )
+
+        // 分类 chips：上滑收起、回顶滑回；顶栏 EropicTopBar 不参与收起，始终可见。
+        AnimatedVisibility(
+            visible = chipsVisible,
+            enter = slideInVertically(initialOffsetY = { -it }) + fadeIn() +
+                expandVertically(expandFrom = Alignment.Top),
+            exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut() +
+                shrinkVertically(shrinkTowards = Alignment.Top),
         ) {
-            items(CleanupCategory.entries.toList(), key = { it.name }) { item ->
-                FilterChip(
-                    selected = category == item,
-                    onClick = { category = item },
-                    label = { Text(item.label) },
-                )
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(CleanupCategory.entries.toList(), key = { it.name }) { item ->
+                    FilterChip(
+                        selected = category == item,
+                        onClick = { category = item },
+                        label = { Text(item.label) },
+                    )
+                }
             }
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            item { IndexCard(indexState, onStart = viewModel::startIndex, onCancel = viewModel::cancelIndex) }
-
-            when (val current = content) {
-                CleanupContent.Loading -> item {
-                    Box(
-                        modifier = Modifier.fillMaxWidth().height(80.dp),
-                        contentAlignment = Alignment.Center,
-                    ) { CircularProgressIndicator() }
-                }
-
-                is CleanupContent.Grouped -> {
-                    item {
-                        ContentHeader(
-                            summary = when (category) {
-                                CleanupCategory.DUPLICATES ->
-                                    if (current.groups.isEmpty()) "还没有精确重复分组。" else
-                                        "精确重复：文件内容（SHA-256）完全一致的图片，默认按可释放空间排序。"
-
-                                CleanupCategory.DIFF ->
-                                    if (current.groups.isEmpty()) "还没有差分图分组。" else
-                                        "差分图：文件名主体相同、只有 p0/p1 这类结尾不同，已从相似判定里排除；保留哪张由你决定。"
-
-                                else ->
-                                    if (current.groups.isEmpty()) "还没有相似图片分组。" else
-                                        "相似图片：dHash 与 pHash 双重距离阈值内的图片，不一定真的相同，需逐组确认。"
-                            },
-                            onRefresh = { refreshToken++ },
-                        )
+        // 列表外面挂嵌套滚动：上滑把 chips 收起来，回顶再滑回来（与文件夹详情页同一套做法）。
+        Box(modifier = Modifier.fillMaxWidth().weight(1f).nestedScroll(chipsScrollConnection)) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                when (val current = content) {
+                    CleanupContent.Loading -> item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(80.dp),
+                            contentAlignment = Alignment.Center,
+                        ) { CircularProgressIndicator() }
                     }
-                    if (current.groups.isEmpty()) {
-                        item { EmptyHint() }
-                    } else {
-                        // 全局汇总条：跨分组显示总勾选数，并提供一键全选建议 / 一键删除。
+
+                    is CleanupContent.Grouped -> {
                         item {
-                            SelectionSummaryBar(
-                                selectedCount = selectedIds.size,
-                                selectedBytes = selectedBytes,
-                                hasWriteAccess = hasWriteAccess,
-                                onSelectAllSuggested = { selectionOverrides.clear() },
-                                // 全部取消：把当前已知成员逐个覆盖成「不勾选」，默认建议不会再把它们选回来。
-                                onClearAll = { knownIds.forEach { selectionOverrides[it] = false } },
-                                onApply = { applyTrash(selectedIds.toList()) },
-                                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
-                            )
-                        }
-                        items(current.groups, key = { it.groupId }) { group ->
-                            GroupItem(
-                                group = group,
-                                members = memberMap[group.groupId].orEmpty(),
-                                assessment = assessmentMap[group.groupId]
-                                    ?: QualityScorer.assess(emptyList()),
-                                selectedIds = selectedIds,
-                                loadThumbnail = viewModel::thumbnailFile,
-                                hasWriteAccess = hasWriteAccess,
-                                onToggleTrash = { toggleTrash(it) },
-                                onSelectSuggested = { trashIds ->
-                                    trashIds.forEach { selectionOverrides[it] = true }
-                                },
-                                onApply = { ids -> applyTrash(ids) },
-                                onOpenViewer = onOpenViewer,
-                                onCompare = { compareGroupId = group.groupId },
-                                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
-                                onIgnoreGroup = {
-                                    // 保留本组：把该组全部成员标记为「以后不考虑」，视图里随即移除该组。
-                                    scope.launch {
-                                        viewModel.ignoreGroup(group.groupId)
-                                        // 组没了，它上面的勾选覆盖记录也一起清掉，避免影响下一轮建议。
-                                        selectionOverrides.clear()
-                                        refreshToken++
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
+                            ContentHeader(
+                                summary = when (category) {
+                                    CleanupCategory.DUPLICATES ->
+                                        if (current.groups.isEmpty()) "还没有精确重复分组。" else
+                                            "精确重复：文件内容（SHA-256）完全一致的图片，默认按可释放空间排序。"
 
-                is CleanupContent.Detected -> {
-                    item {
-                        ContentHeader(
-                            summary = current.summary,
-                            onRefresh = { refreshToken++ },
-                        )
-                    }
-                    if (current.items.isEmpty()) {
-                        item { EmptyHint() }
-                    } else {
-                        val ids = current.items.map { it.id }
-                        itemsIndexed(current.items, key = { _, item -> item.id }) { index, item ->
-                            MediaListRow(
-                                media = item,
-                                loadThumbnail = viewModel::thumbnailFile,
-                                onClick = { onOpenViewer(ids, index) },
+                                    CleanupCategory.DIFF ->
+                                        if (current.groups.isEmpty()) "还没有差分图分组。" else
+                                            "差分图：文件名主体相同、只有 p0/p1 这类结尾不同，已从相似判定里排除；保留哪张由你决定。"
+
+                                    else ->
+                                        if (current.groups.isEmpty()) "还没有相似图片分组。" else
+                                            "相似图片：dHash 与 pHash 双重距离阈值内的图片，不一定真的相同，需逐组确认。"
+                                },
+                                onRefresh = { refreshToken++ },
                             )
+                        }
+                        if (current.groups.isEmpty()) {
+                            item { EmptyHint() }
+                        } else {
+                            // 全局汇总条：跨分组显示总勾选数，并提供一键全选建议 / 一键删除。
+                            item {
+                                SelectionSummaryBar(
+                                    selectedCount = selectedIds.size,
+                                    selectedBytes = selectedBytes,
+                                    hasWriteAccess = hasWriteAccess,
+                                    onSelectAllSuggested = { selectionOverrides.clear() },
+                                    // 全部取消：把当前已知成员逐个覆盖成「不勾选」，默认建议不会再把它们选回来。
+                                    onClearAll = { knownIds.forEach { selectionOverrides[it] = false } },
+                                    onApply = { applyTrash(selectedIds.toList()) },
+                                    onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
+                                )
+                            }
+                            items(current.groups, key = { it.groupId }) { group ->
+                                GroupItem(
+                                    group = group,
+                                    members = memberMap[group.groupId].orEmpty(),
+                                    assessment = assessmentMap[group.groupId]
+                                        ?: QualityScorer.assess(emptyList()),
+                                    selectedIds = selectedIds,
+                                    loadThumbnail = viewModel::thumbnailFile,
+                                    hasWriteAccess = hasWriteAccess,
+                                    onToggleTrash = { toggleTrash(it) },
+                                    onSelectSuggested = { trashIds ->
+                                        trashIds.forEach { selectionOverrides[it] = true }
+                                    },
+                                    onApply = { ids -> applyTrash(ids) },
+                                    onOpenViewer = onOpenViewer,
+                                    onCompare = { compareGroupId = group.groupId },
+                                    onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
+                                    onIgnoreGroup = {
+                                        // 保留本组：把该组全部成员标记为「以后不考虑」，视图里随即移除该组。
+                                        scope.launch {
+                                            viewModel.ignoreGroup(group.groupId)
+                                            // 组没了，它上面的勾选覆盖记录也一起清掉，避免影响下一轮建议。
+                                            selectionOverrides.clear()
+                                            refreshToken++
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+
+                    is CleanupContent.Detected -> {
+                        item {
+                            ContentHeader(
+                                summary = current.summary,
+                                onRefresh = { refreshToken++ },
+                            )
+                        }
+                        if (current.items.isEmpty()) {
+                            item { EmptyHint() }
+                        } else {
+                            val ids = current.items.map { it.id }
+                            itemsIndexed(current.items, key = { _, item -> item.id }) { index, item ->
+                                MediaListRow(
+                                    media = item,
+                                    loadThumbnail = viewModel::thumbnailFile,
+                                    onClick = { onOpenViewer(ids, index) },
+                                )
+                            }
                         }
                     }
                 }
@@ -570,8 +627,13 @@ private fun EmptyHint() {
 }
 
 @Composable
-private fun IndexCard(indexState: IndexState, onStart: () -> Unit, onCancel: () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+private fun IndexCard(
+    indexState: IndexState,
+    onStart: () -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(modifier = modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(text = "索引与查重", style = MaterialTheme.typography.titleMedium)
             Text(

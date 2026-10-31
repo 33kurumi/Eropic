@@ -12,6 +12,11 @@
     <!-- Android 14+ 用户可能只授权部分照片，必须能感知这种状态 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- v1.0 应用内更新需要安装 APK：缺这一条时（Android 8+）点「安装」会静默无反应，
+         因为系统认为本应用无权请求安装（canRequestPackageInstalls()=false）。
+         声明后仍需用户在系统里为 Eropic 打开「安装未知应用」，应用内会给跳转引导。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- v0.2 联网识图（以图搜图）需要访问网络；本地识图与其余功能完全离线可用。
          除用户主动点「联网搜图」外，应用不会发起任何网络请求（ADR-0006 仍然成立：没有自动上传/云同步）。 -->
     <uses-permission android:name="android.permission.INTERNET" />

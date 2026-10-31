@@ -41,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +64,7 @@ import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.openSystemStorageAccessSettings
 import io.github.kurumi33.eropic.ui.update.UpdateSection
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,7 +100,11 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         // v0.5：统一顶栏；副标题带上版本号，用户反馈问题时能直接说明用的哪一版。
-        EropicTopBar(title = "设置", subtitle = "v0.7")
+        EropicTopBar(
+            title = "设置",
+            subtitle = "v" + versionName.substringBefore("-"),
+            compactHeight = true,
+        )
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -107,7 +113,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             // v0.4：每个功能组一个外框（SettingsSection），组里的行直接排在框内，不再叠一层卡片。
-            // 顺序：外观 → 图库与查看 → 清理与回收站 → 资源与缓存 → 后台与电量 → 存储权限 → 更多页面 → 关于。
+            // 顺序：应用更新 → 外观 → 图库与查看 → 清理与回收站 → 资源与缓存 → 后台与电量 → 存储权限 → 日志与反馈 → 更多页面 → 关于。
             // v0.6：删掉「联网识图」（Key 已内置进代码、识图入口在底部/清理页），也删掉与关于页重复的入口。
             // v0.7：应用更新放在最前面——进设置时最先想确认的往往是「我是不是最新版」。
             UpdateSection(viewModel = viewModel)
@@ -178,6 +184,13 @@ fun SettingsScreen(viewModel: EropicViewModel) {
                     hasWriteAccess = hasWriteAccess,
                     onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
                 )
+            }
+
+            SettingsSection(
+                title = "日志与反馈",
+                subtitle = "出问题时把日志打包发给开发者，比描述现象更容易定位。",
+            ) {
+                LogAndFeedbackCard(viewModel = viewModel)
             }
 
             SettingsSection(
@@ -428,6 +441,77 @@ private fun StorageAccessCard(
                 Text(if (hasWriteAccess) "去系统设置关闭" else "直接去系统设置")
             }
         }
+    }
+}
+
+/**
+ * 日志与反馈卡（v1.0）：把运行日志、崩溃记录与设备信息打包，交给用户自己选分享渠道。
+ *
+ * 打包与分享都在 ViewModel 里做（collectLogsAndShare 返回打包后的路径），
+ * 这里只负责按钮状态、结果提示和「清空日志」的二次确认——界面不碰文件与 Intent。
+ */
+@Composable
+private fun LogAndFeedbackCard(viewModel: EropicViewModel) {
+    val scope = rememberCoroutineScope()
+    var collecting by remember { mutableStateOf(false) }
+    var showClearDialog by remember { mutableStateOf(false) }
+
+    Text(
+        text = "遇到闪退、卡顿或某个功能看着不对时，把运行日志、崩溃记录和设备与版本信息打包发给我，" +
+            "能省掉反复来回问的时间。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Text(
+        text = "日志只在本机生成；点「打包并分享」后由你选择发到哪个应用，Eropic 不会自己上传任何东西。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            // 打包要读写几十个日志文件，期间把按钮禁掉，免得连点打包出好几份。
+            enabled = !collecting,
+            onClick = {
+                collecting = true
+                scope.launch {
+                    val path = runCatching { viewModel.collectLogsAndShare() }.getOrNull()
+                    // 失败时 ViewModel 自己会提示原因，这里只在成功时补一句；避免同一个失败弹两次。
+                    if (path != null) viewModel.postMessage("日志已打包，请选择分享渠道")
+                    collecting = false
+                }
+            },
+        ) {
+            Text(if (collecting) "正在打包…" else "打包并分享日志")
+        }
+        OutlinedButton(
+            enabled = !collecting,
+            onClick = { showClearDialog = true },
+        ) {
+            Text("清空日志")
+        }
+    }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = { Text("清空日志？") },
+            text = {
+                Text(
+                    "会删除本机保存的运行日志与崩溃记录，不影响照片、索引和设置。" +
+                        "之后如果再出问题，就只有新产生的日志可看了。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showClearDialog = false
+                    // 清空成功后由 ViewModel 自己发提示，这里不重复。
+                    viewModel.clearLogs()
+                }) { Text("清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) { Text("取消") }
+            },
+        )
     }
 }
 

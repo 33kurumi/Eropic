@@ -486,6 +486,8 @@ private fun FolderTreeContent(
                 title = "文件夹",
                 subtitle = formatCount(tree.size.toLong()) +
                     " 个文件夹 · 合计 " + formatBytes(totalBytes),
+                // v1.0：五个主页统一用紧凑顶栏（整体上移 16dp），二级页保持标准高度。
+                compactHeight = true,
                 actions = {
                     FolderPageMenu(
                         activeSort = activeSort,
@@ -694,6 +696,8 @@ private fun EmptyFoldersScaffold(
     Column(modifier = Modifier.fillMaxSize()) {
         EropicTopBar(
             title = "文件夹",
+            // 主页空态：高度与有索引时保持一致，避免建立索引前后顶栏跳 16dp。
+            compactHeight = true,
             actions = {
                 IconButton(onClick = onToggleLayout) {
                     Icon(

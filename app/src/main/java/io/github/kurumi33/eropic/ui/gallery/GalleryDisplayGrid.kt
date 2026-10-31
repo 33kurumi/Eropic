@@ -89,6 +89,15 @@ fun GalleryDisplayGrid(
      * 默认空实现：不是所有调用方都关心分组键。
      */
     onVisibleGroupKeys: (Set<String>) -> Unit = {},
+    /**
+     * 分组键 → 该组真实张数（全库聚合，来自 ViewModel.galleryGroupStats）。
+     *
+     * 行数据本身只能从"已加载的分页项"展开，所以 Header 的 row.count 只是**已加载**张数：
+     * 首屏只加载几十条时，标题会显示「2026年10月 · 800 张」这种偏小的数字（v1.0.0 缺陷）。
+     * 这里用数据库聚合结果覆盖显示张数；查不到（比如不按时间排序时键里带段号、
+     * 或聚合还没回来）就退回已加载张数，绝不显示空。
+     */
+    groupCounts: Map<String, Long> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     val loadedCount = items.itemCount
@@ -161,7 +170,12 @@ fun GalleryDisplayGrid(
             },
         ) { index ->
             when (val row = rows[index]) {
-                is GalleryDisplayRow.Header -> GalleryGroupHeaderCell(row, onToggleGroup)
+                is GalleryDisplayRow.Header -> GalleryGroupHeaderCell(
+                    row = row,
+                    // 优先用全库聚合张数；没有这个键（未分组/非时间排序的段键）时退回已加载张数。
+                    totalCount = groupCounts[row.key] ?: row.count.toLong(),
+                    onToggleGroup = onToggleGroup,
+                )
 
                 is GalleryDisplayRow.Photo -> {
                     val entity = row.entity
@@ -189,10 +203,16 @@ fun GalleryDisplayGrid(
     }
 }
 
-/** 分组标题单元格：整行可点击，标题显示"2026年10月 · 123 张"，右侧箭头表示折叠状态。 */
+/**
+ * 分组标题单元格：整行可点击，标题显示"2026年10月 · 123 张"，右侧箭头表示折叠状态。
+ *
+ * [totalCount] 是该组的**全库真实张数**（由上层聚合查询给出），不是已加载张数：
+ * 分页只加载了一部分，用 row.count 当标题会在刚打开图库时严重偏小。
+ */
 @Composable
 private fun GalleryGroupHeaderCell(
     row: GalleryDisplayRow.Header,
+    totalCount: Long,
     onToggleGroup: (String) -> Unit,
 ) {
     Row(
@@ -205,7 +225,7 @@ private fun GalleryGroupHeaderCell(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = row.label + " · " + row.count + " 张",
+            text = row.label + " · " + totalCount + " 张",
             style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             // 占满剩余宽度：把箭头顶到最右侧，折叠/展开的方向一眼可见

@@ -4,4 +4,8 @@
     <cache-path
         name="updates"
         path="updates/" />
+    <!-- v1.0 上传日志：LogCollector 把日志写在 cacheDir/logs/，分享面板通过 FileProvider 读这个目录 -->
+    <cache-path
+        name="logs"
+        path="logs/" />
 </paths>

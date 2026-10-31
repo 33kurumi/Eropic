@@ -62,7 +62,12 @@ class UpdateChecker(
      * 存 cacheDir 而不是外部存储：系统「清理缓存」能顺手回收，也免得在用户相册目录里扔安装包。
      * 下载先写 .part 再改名，避免中途失败留下一个「看起来完整」的 APK。
      */
-    suspend fun download(info: UpdateInfo, onProgress: (Float) -> Unit): String =
+    suspend fun download(
+        info: UpdateInfo,
+        onProgress: (Float) -> Unit,
+        /** 用户点「取消」时置 true：每写一块检查一次，取消后立即抛 CancellationException 并删掉 .part。 */
+        isCancelled: () -> Boolean = { false },
+    ): String =
         withContext(Dispatchers.IO) {
             val downloadUrl = info.downloadUrl
                 ?: throw IOException("这个 release 没有附 APK，只能打开发布页手动下载")
@@ -82,6 +87,9 @@ class UpdateChecker(
                         val buffer = ByteArray(64 * 1024)
                         var written = 0L
                         while (true) {
+                            if (isCancelled()) {
+                                throw kotlinx.coroutines.CancellationException("用户取消下载")
+                            }
                             val read = input.read(buffer)
                             if (read <= 0) break
                             output.write(buffer, 0, read)
@@ -119,8 +127,26 @@ class UpdateChecker(
             notes = json.optString("body").takeIf { it.isNotBlank() },
             downloadUrl = apkUrl,
             pageUrl = json.optString("html_url").takeIf { it.isNotBlank() },
+            publishedAtMs = parseIsoTime(json.optString("published_at")),
         ).takeIf { version.isNotBlank() }
     }.getOrNull()
+
+    /**
+     * GitHub 的 "published_at" 是 ISO8601（如 2026-10-31T06:12:00Z）。
+     *
+     * 用 java.time 解析而不手写正则：时区、闰秒、毫秒都交给标准库；解析不了返回 0（卡片不显示时间）。
+     */
+    private fun parseIsoTime(raw: String?): Long {
+        val text = raw?.trim().orEmpty()
+        if (text.isEmpty()) return 0L
+        return runCatching {
+            java.time.Instant.parse(text).toEpochMilli()
+        }.getOrElse {
+            runCatching {
+                java.time.OffsetDateTime.parse(text).toInstant().toEpochMilli()
+            }.getOrDefault(0L)
+        }
+    }
 
     private fun statusHint(code: Int): String = when (code) {
         403 -> "访问太频繁或仓库是私有的"

@@ -15,6 +15,8 @@ data class UpdateInfo(
     val downloadUrl: String? = null,
     /** release 的网页地址，用于「打开发布页」。 */
     val pageUrl: String? = null,
+    /** release 发布时间（毫秒）；0 表示 GitHub 没给，卡片上不显示这一行。 */
+    val publishedAtMs: Long = 0L,
 )
 
 /**
@@ -37,6 +39,14 @@ data class UpdateUiState(
     val downloadedPath: String? = null,
     /** 一次性提示（下载成功 / 安装包被系统拒绝等）。 */
     val message: String? = null,
+    /**
+     * 缺少「安装未知应用」授权（API 26+ 才有这个概念）。
+     *
+     * v1.0 修「点安装没反应」：manifest 之前少了 REQUEST_INSTALL_PACKAGES，
+     * 系统直接拒绝启动安装器且不给任何界面；现在补了权限，还需要用户在系统里
+     * 为本应用打开「安装未知应用」，卡片据此显示「去授权」按钮。
+     */
+    val needsInstallPermission: Boolean = false,
 )
 
 /**

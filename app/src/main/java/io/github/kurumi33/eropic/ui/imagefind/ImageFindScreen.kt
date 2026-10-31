@@ -4,9 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -36,6 +33,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
@@ -43,7 +41,6 @@ import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.PersonSearch
-import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.SearchOff
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -51,7 +48,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -86,7 +83,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
-import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.media.MediaUris
 import io.github.kurumi33.eropic.core.search.CharacterMatchResult
 import io.github.kurumi33.eropic.core.search.OnlineSearchResult
@@ -128,32 +124,14 @@ private const val MAX_CHARACTER_CHIPS = 5
  */
 
 /**
- * 本地识图的源图：要么是「从设备选图」拿到的 content Uri，要么是「从图库选」里的一张已索引图片。
- *
- * 只有展示需要的信息才会被记住；真正的指纹与比对都在 ViewModel/仓库里做。
- */
-private sealed interface FindSource {
-    data class DeviceUri(val uri: Uri) : FindSource
-
-    data class LibraryMedia(val mediaId: Long, val displayName: String) : FindSource
-}
-
-/** 「从图库选」候选图的加载状态：空目录和还在加载要给出不同提示。 */
-private sealed interface CandidateState {
-    data object Idle : CandidateState
-
-    data object Loading : CandidateState
-
-    data class Loaded(val items: List<MediaEntity>) : CandidateState
-}
-
-/**
  * 页面级会话状态：EropicRoot 打开查看器时会把承载页整体移出组合，普通 remember 会丢，
  * 回到页面就只剩空引导页。识图流程几乎必然要「点结果进查看器再返回」，所以把源图与关键词
  * 放在这个进程内单例里；进程被杀时本来就会重新开始，不持久化到磁盘。
+ *
+ * v1.0：源图只剩一种来源（选择器给出的 content Uri），因此[ImageFindSession] 里直接存 Uri。
  */
 private object ImageFindSession {
-    var source: FindSource? = null
+    var sourceUri: Uri? = null
     var keywordInput: String = ""
     var appliedKeyword: String = ""
 
@@ -195,7 +173,7 @@ fun ImageFindScreen(
 
     // 当前选中的源图；null 表示还在引导页。状态放在文件级会话对象里：
     // 打开查看器时 EropicRoot 会把整页移出组合，普通 remember 会丢，回到页面时源图就没了。
-    var source by remember { mutableStateOf(ImageFindSession.source) }
+    var sourceUri by remember { mutableStateOf(ImageFindSession.sourceUri) }
     // keywordInput 是输入框原文，appliedKeyword 是已经交给 ViewModel 的关键词，两者比较做防抖。
     var keywordInput by remember { mutableStateOf(ImageFindSession.keywordInput) }
     var appliedKeyword by remember { mutableStateOf(ImageFindSession.appliedKeyword) }
@@ -206,7 +184,8 @@ fun ImageFindScreen(
     // 「找同角色」：点按钮才触发（要调识别服务、可能联网），不能随选图自动跑。
     var characterLoading by remember { mutableStateOf(false) }
     var characterResult by remember { mutableStateOf(ImageFindSession.characterResult) }
-    var showCandidates by remember { mutableStateOf(false) }
+    // 是否正在用 App 内的源图选择器挑图（v1.0 起取代系统照片选择器）。
+    var showDevicePicker by remember { mutableStateOf(false) }
     // 0 = 本地识图，1 = 联网识图。
     var selectedTab by remember { mutableStateOf(0) }
     // 双指捏合临时改的列数：只影响本次浏览，不回写设置，离开页面就恢复。
@@ -217,37 +196,21 @@ fun ImageFindScreen(
     LaunchedEffect(settings.gridColumns) { columnOverride = null }
 
     // 同步到会话对象，保证从查看器返回（本页被销毁重组）后还能接着看结果。
-    LaunchedEffect(source) { ImageFindSession.source = source }
+    LaunchedEffect(sourceUri) { ImageFindSession.sourceUri = sourceUri }
     LaunchedEffect(keywordInput) { ImageFindSession.keywordInput = keywordInput }
     LaunchedEffect(appliedKeyword) { ImageFindSession.appliedKeyword = appliedKeyword }
 
-    // 结果格与候选格共用缩略图缓存；hit 只有 mediaId，先取回实体再走缓存。
+    // 结果格共用缩略图缓存；hit 只有 mediaId，先取回实体再走缓存。
     // 这里刻意不套 remember：suspend lambda 放在 remember 的计算块里时，Kotlin 推不出它的
-    // 期望类型（会报 "Unknown return lambda parameter type"），而这两个 lambda 只捕获 viewModel，
+    // 期望类型（会报 "Unknown return lambda parameter type"），而这个 lambda 只捕获 viewModel，
     // 每次重组重建一个的开销可以忽略。
     val hitThumbnail: suspend (Long) -> File? = { mediaId: Long ->
         viewModel.mediaById(mediaId)?.let { entity -> viewModel.thumbnailFile(entity) }
     }
-    val entityThumbnail: suspend (MediaEntity) -> File? = { entity: MediaEntity ->
-        viewModel.thumbnailFile(entity)
-    }
-
-    // 候选图只在展开时才查，避免每次进页面都扫一遍最近图片。
-    val candidates by produceState<CandidateState>(CandidateState.Idle, showCandidates) {
-        if (!showCandidates) {
-            value = CandidateState.Idle
-            return@produceState
-        }
-        value = CandidateState.Loading
-        value = CandidateState.Loaded(
-            runCatching { viewModel.searchSourceCandidates() }.getOrDefault(emptyList()),
-        )
-    }
 
     // 清掉源图回到引导页；关键词保留，方便换一张图继续用同一个过滤词。
     fun resetSource() {
-        source = null
-        showCandidates = false
+        sourceUri = null
         onlineResult = null
         onlineError = null
         characterResult = null
@@ -272,8 +235,9 @@ fun ImageFindScreen(
     }
 
     // 选好源图后触发一次本地检索；失败不崩溃，只提示。联网识图也复用这张源图。
-    fun startLocalSearch(next: FindSource) {
-        source = next
+    // v1.0 源图只有一种来源（content Uri），所以参数直接是 Uri，不再有分支。
+    fun startLocalSearch(nextUri: Uri) {
+        sourceUri = nextUri
         onlineResult = null
         onlineError = null
         characterResult = null
@@ -284,10 +248,7 @@ fun ImageFindScreen(
         appliedKeyword = trimmed
         // 这两个方法只是「登记源图 + 触发一次后台检索」，结果统一走 similarityHits 状态流。
         if (keywordChanged) viewModel.setSimilarityKeyword(trimmed)
-        when (next) {
-            is FindSource.DeviceUri -> viewModel.findSimilarByUri(next.uri)
-            is FindSource.LibraryMedia -> viewModel.findSimilarByMediaId(next.mediaId)
-        }
+        viewModel.findSimilarByUri(nextUri)
     }
 
     // 联网识图：上传当前源图 → 把「结果页 / 条目列表 / 失败原因」交给「联网结果」区块。
@@ -296,7 +257,7 @@ fun ImageFindScreen(
     // 同一时间只允许一个请求，避免连点重复上传。
     fun launchOnlineSearch(provider: ReverseImageProvider) {
         if (onlineLoading != null) return
-        if (source == null) {
+        if (sourceUri == null) {
             viewModel.postMessage("请先选择一张源图")
             return
         }
@@ -327,16 +288,13 @@ fun ImageFindScreen(
     // [clearPrevious] = true 时先清空旧结果（按钮第一次点击）；
     // 点角色名再搜时传 false，保留旧卡片直到新结果回来，页面不会闪一下。
     fun findCharacterMatches(clearPrevious: Boolean = true) {
-        val current = source ?: return
+        val currentUri = sourceUri ?: return
         if (characterLoading) return
         characterLoading = true
         if (clearPrevious) characterResult = null
         scope.launch {
             val result: CharacterMatchResult? = try {
-                when (current) {
-                    is FindSource.DeviceUri -> viewModel.findCharacterMatchesByUri(current.uri)
-                    is FindSource.LibraryMedia -> viewModel.findCharacterMatchesByMediaId(current.mediaId)
-                }
+                viewModel.findCharacterMatchesByUri(currentUri)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -382,40 +340,28 @@ fun ImageFindScreen(
         }
     }
 
-    // 设备选图：系统照片选择器，只允许选图片。
-    val pickImageLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
-    ) { uri: Uri? ->
-        if (uri != null) startLocalSearch(FindSource.DeviceUri(uri))
-    }
-
-    // 「浏览文件…」：OpenDocument 打开的是系统文件选择器（DocumentsUI），自带「最近 / 图片 / 下载 / 设备」
-    // 与侧栏目录浏览，用来选那些不在系统照片库里的图片（比如刚下到「下载」目录的文件）。
-    // 与照片选择器走同一条「按当前 URI 找相似」路径，只是多一步可读性检查：OpenDocument 拿到的 URI
-    // 在个别机型上可能读不了，这时直接提示，不让 ViewModel 里抛异常。
-    val browseFileLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-    ) { uri: Uri? ->
-        if (uri != null) {
-            val readable = runCatching {
-                context.contentResolver.openInputStream(uri)?.use { true } ?: false
-            }.getOrDefault(false)
-            if (readable) {
-                startLocalSearch(FindSource.DeviceUri(uri))
-            } else {
-                viewModel.postMessage("无法读取这张图片，请换一个文件再试")
-            }
-        }
-    }
-
     // 关键词 400ms 防抖：输入停顿后才让 ViewModel 重新比对。
-    LaunchedEffect(keywordInput, source) {
-        if (source == null) return@LaunchedEffect
+    LaunchedEffect(keywordInput, sourceUri) {
+        if (sourceUri == null) return@LaunchedEffect
         val trimmed = keywordInput.trim()
         if (trimmed == appliedKeyword) return@LaunchedEffect
         delay(KEYWORD_DEBOUNCE_MS)
         if (trimmed == appliedKeyword) return@LaunchedEffect
         applyKeywordNow(trimmed)
+    }
+
+    // 选源图：v1.0 用 App 内选择器整页替换本页（连带顶栏），选好一张就回来直接开始检索。
+    // 这里在组合期提前 return：选择器自带返回键处理，不需要本页的 BackHandler 同时生效。
+    if (showDevicePicker) {
+        DevicePickerScreen(
+            viewModel = viewModel,
+            onPicked = { uri ->
+                showDevicePicker = false
+                startLocalSearch(uri)
+            },
+            onBack = { showDevicePicker = false },
+        )
+        return
     }
 
     // onBack 为 null 表示这是底部 Tab 的一级页面，交给系统默认返回即可。
@@ -426,8 +372,9 @@ fun ImageFindScreen(
             title = "识图",
             subtitle = "本地相似图 · 联网以图搜图",
             onBack = onBack,
+            compactHeight = true,
             actions = {
-                if (source != null) {
+                if (sourceUri != null) {
                     IconButton(onClick = { resetSource() }) {
                         Icon(imageVector = Icons.Filled.Refresh, contentDescription = "换一张源图")
                     }
@@ -446,31 +393,14 @@ fun ImageFindScreen(
             }
         }
 
-        if (source == null) {
+        if (sourceUri == null) {
             // 还没选源图：两个 Tab 共用同一段引导，选好后自动切到当前 Tab 的内容。
-            SourceGuidance(
-                candidates = candidates,
-                showCandidates = showCandidates,
-                onPickFromDevice = {
-                    pickImageLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                },
-                // DocumentsUI 用 MIME 数组启动；只收图片，避免选到文档后才在解码阶段失败。
-                onBrowseFiles = { browseFileLauncher.launch(arrayOf("image/*")) },
-                onToggleCandidates = { showCandidates = !showCandidates },
-                onPickCandidate = { entity ->
-                    showCandidates = false
-                    startLocalSearch(FindSource.LibraryMedia(entity.id, entity.displayName))
-                },
-                entityThumbnail = entityThumbnail,
-                thumbnailsEnabled = settings.thumbnailCacheEnabled,
-            )
+            SourceGuidance(onPickFromDevice = { showDevicePicker = true })
         } else {
-            val current = source
-            if (current != null) {
+            val currentUri = sourceUri
+            if (currentUri != null) {
                 SourceSummary(
-                    source = current,
+                    sourceUri = currentUri,
                     onReselect = { resetSource() },
                 )
                 when (selectedTab) {
@@ -633,18 +563,9 @@ private fun LocalFindTab(
     }
 }
 
-/** 引导态：还没选源图时看到的内容。 */
+/** 引导态：还没选源图时看到的内容。v1.0 起只剩一个入口——App 内的源图选择器。 */
 @Composable
-private fun SourceGuidance(
-    candidates: CandidateState,
-    showCandidates: Boolean,
-    onPickFromDevice: () -> Unit,
-    onBrowseFiles: () -> Unit,
-    onToggleCandidates: () -> Unit,
-    onPickCandidate: (MediaEntity) -> Unit,
-    entityThumbnail: suspend (MediaEntity) -> File?,
-    thumbnailsEnabled: Boolean,
-) {
+private fun SourceGuidance(onPickFromDevice: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -696,81 +617,21 @@ private fun SourceGuidance(
             Spacer(modifier = Modifier.width(8.dp))
             Text("从设备选图")
         }
-        // v0.8：照片选择器只能看图库里的图，选不到「下载」等目录；这里再给一个系统文件选择器入口。
-        OutlinedButton(
-            onClick = onBrowseFiles,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-        ) {
-            Text("浏览文件…")
-        }
+        // v1.0：选图统一走 App 内选择器（照片 / 相册 + 浏览文件），不再区分系统照片选择器与文件选择器。
         Text(
-            text = "「从设备选图」打开系统照片选择器；「浏览文件…」打开系统文件管理器，可以进入下载、U 盘等任意目录挑图。",
+            text = "「从设备选图」打开 App 内的选择器：可以按「照片」「相册」浏览已建立索引的图片；不在图库里的图片（比如「下载」目录），用选择器右上角的「浏览文件」从系统文件管理器挑。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 6.dp),
+            modifier = Modifier.padding(top = 12.dp),
         )
-        OutlinedButton(
-            onClick = onToggleCandidates,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-        ) {
-            Icon(imageVector = Icons.Outlined.PhotoLibrary, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(if (showCandidates) "收起图库图片" else "从图库选")
-        }
-
-        if (showCandidates) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 12.dp),
-            ) {
-                when (val state = candidates) {
-                    is CandidateState.Loading -> Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(160.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator()
-                    }
-
-                    is CandidateState.Loaded -> {
-                        if (state.items.isEmpty()) {
-                            Text(
-                                text = "图库里还没有图片，先回到图库建立索引后再来选。",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 24.dp),
-                            )
-                        } else {
-                            CandidateGrid(
-                                items = state.items,
-                                thumbnailsEnabled = thumbnailsEnabled,
-                                thumbnailProvider = entityThumbnail,
-                                onPick = onPickCandidate,
-                            )
-                        }
-                    }
-
-                    is CandidateState.Idle -> Unit
-                }
-            }
-        }
     }
 }
 
 /** 已选源图的摘要行：缩略图 + 简易来源说明 + 换图入口。 */
 @Composable
 private fun SourceSummary(
-    source: FindSource,
+    sourceUri: Uri,
     onReselect: () -> Unit,
 ) {
     Row(
@@ -779,12 +640,8 @@ private fun SourceSummary(
             .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val preview: Any = when (source) {
-            is FindSource.DeviceUri -> source.uri
-            is FindSource.LibraryMedia -> MediaUris.of(source.mediaId)
-        }
         AsyncImage(
-            model = preview,
+            model = sourceUri,
             contentDescription = "当前源图",
             contentScale = ContentScale.Crop,
             modifier = Modifier
@@ -797,19 +654,13 @@ private fun SourceSummary(
                 .padding(start = 12.dp),
         ) {
             Text(
-                text = when (source) {
-                    is FindSource.DeviceUri -> "设备选图"
-                    is FindSource.LibraryMedia -> source.displayName
-                },
+                text = "设备选图",
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = when (source) {
-                    is FindSource.DeviceUri -> "本地比对不上传；联网识图会上传这张图"
-                    is FindSource.LibraryMedia -> "来自图库的最近图片"
-                },
+                text = "本地比对不上传；联网识图会上传这张图",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -820,8 +671,7 @@ private fun SourceSummary(
     }
 }
 
-/** 「联网识图」Tab：7 家服务商（自动换行）+ 联网结果区块；整块独立滚动。 */
-@OptIn(ExperimentalLayoutApi::class)
+/** 「联网识图」Tab：7 家服务商一行一条 + 联网结果区块；整块独立滚动。 */
 @Composable
 private fun OnlineFindTab(
     modifier: Modifier = Modifier,
@@ -886,31 +736,25 @@ private fun OnlineFindTab(
             )
         }
 
-        // 7 家服务商 chips 自动换行，避免挤在一行里把按钮压扁。
-        FlowRow(
+        // v1.0：服务商从「一排 chip」改成「一行一条」的列表：左边名称与一句说明、右边箭头，
+        // 点整行就发起搜索。chip 换行后会参差不齐，而且一句话说明没地方放。
+        OutlinedCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            ReverseImageProvider.entries.forEach { provider ->
-                FilterChip(
-                    selected = onlineLoading == provider,
-                    onClick = { onSearch(provider) },
+            ReverseImageProvider.entries.forEachIndexed { index, provider ->
+                OnlineProviderRow(
+                    provider = provider,
+                    loading = onlineLoading == provider,
                     enabled = onlineLoading == null,
-                    label = { Text(provider.label) },
-                    leadingIcon = if (onlineLoading == provider) {
-                        {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp,
-                            )
-                        }
-                    } else {
-                        null
-                    },
+                    onClick = { onSearch(provider) },
                 )
+                if (index != ReverseImageProvider.entries.lastIndex) {
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
+                }
             }
         }
 
@@ -963,6 +807,68 @@ private fun OnlineFindTab(
             OnlineResultsSection(result = currentResult, onOpenUrl = onOpenUrl)
         }
     }
+}
+
+/** 服务商列表的一行：名称 + 一句说明 + 右侧箭头（正在上传时换成转圈）。 */
+@Composable
+private fun OnlineProviderRow(
+    provider: ReverseImageProvider,
+    loading: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = provider.label,
+                style = MaterialTheme.typography.titleSmall,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                },
+            )
+            Text(
+                text = providerSubtitle(provider),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 服务商的一句话说明。
+ *
+ * core 的 [ReverseImageProvider] 只有 label 与 homeUrl，没有描述字段；这段是纯展示文案，
+ * 也没有跨模块复用价值，所以放在 UI 里，不为了它去改 core 的 API。
+ */
+private fun providerSubtitle(provider: ReverseImageProvider): String = when (provider) {
+    ReverseImageProvider.GOOGLE_LENS -> "通用识图，覆盖最广，需要代理"
+    ReverseImageProvider.BAIDU -> "国内可直连，实拍与中文场景更准"
+    ReverseImageProvider.SAUCENAO -> "二次元图库索引最全，需要代理"
+    ReverseImageProvider.ASCII2D -> "二次元以图搜图，需要代理"
+    ReverseImageProvider.IQDB -> "二次元图库检索，需要代理"
+    ReverseImageProvider.ONEGAI -> "按公网图片链接搜，App 先上传临时图床"
+    ReverseImageProvider.LENSO -> "AI 图像检索，App 先上传临时图床"
 }
 
 /** 联网识图异常（无网、上传失败等）的红色提示卡。 */
@@ -1221,70 +1127,6 @@ private fun SimilarHitCell(
                     shape = RoundedCornerShape(4.dp),
                 )
                 .padding(horizontal = 4.dp, vertical = 1.dp),
-        )
-    }
-}
-
-/** 「从图库选」的候选小网格：固定高度，避免和图库其余部分互相抢滚动。 */
-@Composable
-private fun CandidateGrid(
-    items: List<MediaEntity>,
-    thumbnailsEnabled: Boolean,
-    thumbnailProvider: suspend (MediaEntity) -> File?,
-    onPick: (MediaEntity) -> Unit,
-) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(4),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(240.dp),
-        contentPadding = PaddingValues(2.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        itemsIndexed(items, key = { _, item -> item.id }) { _, item ->
-            CandidateCell(
-                item = item,
-                thumbnailsEnabled = thumbnailsEnabled,
-                thumbnailProvider = thumbnailProvider,
-                onClick = { onPick(item) },
-            )
-        }
-    }
-}
-
-@Composable
-private fun CandidateCell(
-    item: MediaEntity,
-    thumbnailsEnabled: Boolean,
-    thumbnailProvider: suspend (MediaEntity) -> File?,
-    onClick: () -> Unit,
-) {
-    val model by produceState<Any>(
-        MediaUris.of(item.id),
-        item.id,
-        thumbnailsEnabled,
-    ) {
-        value = if (thumbnailsEnabled) {
-            runCatching { thumbnailProvider(item) }
-                .getOrNull()
-                ?.let { Uri.fromFile(it) }
-                ?: MediaUris.of(item.id)
-        } else {
-            MediaUris.of(item.id)
-        }
-    }
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(1f)
-            .clickable(onClick = onClick),
-    ) {
-        AsyncImage(
-            model = model,
-            contentDescription = item.displayName,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
         )
     }
 }

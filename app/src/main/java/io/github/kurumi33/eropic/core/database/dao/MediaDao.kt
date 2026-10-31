@@ -203,6 +203,39 @@ interface MediaDao {
     )
     suspend fun statsByFolder(limit: Int): List<StatRow>
 
+    /**
+     * 图库日期分组的**真实**张数（v1.0 修「2026年10月显示 800 张」）。
+     *
+     * 图库网格只用「已分页加载的行」拼分组标题，标题里的张数因此等于已加载数；
+     * 分组标题必须显示整组真实数量，所以这里按分组键做一次聚合。
+     * - key 格式与 [io.github.kurumi33.eropic.core.gallery.GalleryDates.groupKeyOf] 完全一致：
+     *   按月 "2026-10"、按日 "2026-10-28"、拍摄时间缺失统一 "unknown"；
+     * - :favoritesOnly 为 1 时只统计收藏（与图库「只看收藏」筛选保持一致）；
+     * - dateTakenMs <= 0 时 strftime 返回 NULL，COALESCE 成 "unknown" 避免 Room 映射到非空 String 崩溃。
+     */
+    @Query(
+        "SELECT COALESCE(strftime('%Y-%m', dateTakenMs / 1000, 'unixepoch', 'localtime'), 'unknown') AS groupKey, " +
+            "COUNT(*) AS itemCount, COALESCE(SUM(sizeBytes), 0) AS totalBytes " +
+            "FROM media_item WHERE isPresent = 1 " +
+            "AND (:favoritesOnly = 0 OR isFavorite = 1 OR localFavorite = 1) " +
+            "GROUP BY groupKey"
+    )
+    suspend fun galleryMonthStats(favoritesOnly: Boolean): List<StatRow>
+
+    /** 同上，按日 "2026-10-28"。 */
+    @Query(
+        "SELECT COALESCE(strftime('%Y-%m-%d', dateTakenMs / 1000, 'unixepoch', 'localtime'), 'unknown') AS groupKey, " +
+            "COUNT(*) AS itemCount, COALESCE(SUM(sizeBytes), 0) AS totalBytes " +
+            "FROM media_item WHERE isPresent = 1 " +
+            "AND (:favoritesOnly = 0 OR isFavorite = 1 OR localFavorite = 1) " +
+            "GROUP BY groupKey"
+    )
+    suspend fun galleryDayStats(favoritesOnly: Boolean): List<StatRow>
+
+    /** 收藏总数（本地收藏 + 系统收藏）：收藏变化时发新值，供图库分组张数刷新用。 */
+    @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1 AND (isFavorite = 1 OR localFavorite = 1)")
+    fun favoriteCountFlow(): Flow<Int>
+
     /** 真实移动文件和索引里的旧路径都可能给到一个范围（用于"滑动窗口"式操作）。 */
     @Query("SELECT id FROM media_item WHERE isPresent = 1 AND dateTakenMs >= :fromMs AND dateTakenMs < :toMs ORDER BY dateTakenMs ASC")
     suspend fun idsInRange(fromMs: Long, toMs: Long): List<Long>

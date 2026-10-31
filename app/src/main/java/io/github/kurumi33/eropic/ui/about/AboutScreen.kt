@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -81,6 +82,8 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
 
             GitHubCard()
 
+            ContactCard()
+
             AboutSection(title = "隐私协议") {
                 PrivacyLine("所有照片与索引只存在这台手机上；索引删掉也能重建，不会动你的原图。")
                 PrivacyLine("更新包会下载到 cacheDir/updates，安装完成后可以清理，不会长期占空间。")
@@ -96,8 +99,12 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
             }
 
             AboutSection(title = "更新日志") {
-                changelog.forEach { entry ->
+                // 从新到旧排列；版本之间加一条分隔线，长列表里不容易看串行。
+                changelog.forEachIndexed { index, entry ->
                     ChangelogRow(entry = entry)
+                    if (index != changelog.lastIndex) {
+                        HorizontalDivider()
+                    }
                 }
             }
 
@@ -213,6 +220,70 @@ private fun GitHubCard() {
 }
 
 /**
+ * 联系方式：点整行用邮件应用给开发者写信。
+ *
+ * 用 ACTION_SENDTO + mailto：ACTION_VIEW 在部分机型上会被浏览器接走，
+ * 选错应用后「发邮件」就变成了打开网页。
+ */
+@Composable
+private fun ContactCard() {
+    val context = LocalContext.current
+    val email = "Aemeath33@163.com"
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "联系开发者",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            HorizontalDivider()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { openMail(context = context, address = email) }
+                    .padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Email,
+                    contentDescription = "发邮件",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(text = email, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "问题反馈、功能建议，或把设置页打包的日志发到这里都可以。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 用系统邮件应用写一封信；没装邮件应用时静默失败（不弹警告打断阅读）。
+ */
+private fun openMail(context: Context, address: String) {
+    runCatching {
+        context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + address)))
+    }
+}
+
+/**
  * 分组外框，样式对齐设置页的 SettingsSection：
  * 底色 surfaceContainerLow、无阴影，标题在框内顶部，下面一条分隔线。
  */
@@ -267,38 +338,37 @@ private fun PrivacyLine(text: String) {
 }
 
 /**
- * 更新日志的一行：左边版本号（等宽、加粗、主题色），右边一句话说明。
+ * 更新日志的一块：版本号 + 发布日期一行，下面逐条列出这一版的变化。
+ *
+ * 之前是「版本号 + 一整段话」，话一长就没有重点；1.0 起统一改成一条一句话，
+ * 日期放在版本号右边，各版本之间靠调用方的分隔线区分。
  */
 @Composable
 private fun ChangelogRow(entry: ChangelogEntry) {
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(
-            text = entry.version,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.width(34.dp),
-        )
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = entry.summary,
-                style = MaterialTheme.typography.bodySmall,
+                text = entry.version,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
             )
-            // 只有写了发布日期的版本才显示，老条目留空就自然隐藏。
-            if (entry.date.isNotBlank()) {
-                Text(
-                    text = entry.date,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                text = entry.date,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        entry.items.forEach { item ->
+            // 复用隐私协议那条「· + 正文」的样式，全是小字、自动换行。
+            PrivacyLine(item)
         }
     }
 }

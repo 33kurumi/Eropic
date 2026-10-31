@@ -701,6 +701,13 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _updateState = MutableStateFlow(UpdateUiState())
 
+    /** 正在跑的下载协程：用户点「取消下载」时取消它（下载循环每写一块检查一次取消标志）。 */
+    private var downloadJob: kotlinx.coroutines.Job? = null
+
+    /** 取消标志：与 downloadJob.cancel() 双保险——OkHttp 的阻塞读不会响应协程取消，靠它跳出写盘循环。 */
+    @Volatile
+    private var downloadCancelled = false
+
     /** 更新卡片状态（含正在下载的进度）。 */
     val updateState: StateFlow<UpdateUiState> = _updateState
 
@@ -719,7 +726,9 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     fun checkForUpdates() {
         if (_updateState.value.checking) return
         viewModelScope.launch {
-            _updateState.update { it.copy(checking = true, checkingError = null, message = null) }
+            _updateState.update {
+                it.copy(checking = true, checkingError = null, message = null, needsInstallPermission = false)
+            }
             val result = runCatching { updateChecker.check(currentVersionName) }
             val info = result.getOrNull()
             _updateState.update { state ->
@@ -749,13 +758,26 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     fun downloadUpdate() {
         val info = _updateState.value.info ?: return
         if (_updateState.value.downloading) return
-        viewModelScope.launch {
+        downloadCancelled = false
+        downloadJob = viewModelScope.launch {
             _updateState.update { it.copy(downloading = true, progress = 0f, message = "开始下载…") }
             val result = runCatching {
-                updateChecker.download(info) { fraction ->
-                    // download() 在 IO 线程回调；StateFlow 本身线程安全，直接写即可
-                    _updateState.update { it.copy(progress = fraction) }
+                updateChecker.download(
+                    info = info,
+                    onProgress = { fraction ->
+                        // download() 在 IO 线程回调；StateFlow 本身线程安全，直接写即可
+                        _updateState.update { it.copy(progress = fraction) }
+                    },
+                    isCancelled = { downloadCancelled },
+                )
+            }
+            downloadJob = null
+            if (downloadCancelled) {
+                // 用户主动取消：不要把 CancellationException 当失败弹红字
+                _updateState.update {
+                    it.copy(downloading = false, progress = 0f, message = "已取消下载")
                 }
+                return@launch
             }
             _updateState.update { state ->
                 result.fold(
@@ -794,6 +816,19 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
             return
         }
         val context = container.appContext
+        // v1.0 修「点安装没反应」：API 26+ 必须有「安装未知应用」授权，
+        // 否则 startActivity 会被系统静默拒绝（连异常都不抛）。这里先探测，缺权限就置标记让卡片显示「去授权」。
+        val canInstall = runCatching { context.packageManager.canRequestPackageInstalls() }
+            .getOrDefault(true)
+        if (!canInstall) {
+            _updateState.update {
+                it.copy(
+                    needsInstallPermission = true,
+                    message = "需要允许 Eropic 安装应用，点「去授权」后在系统里打开开关",
+                )
+            }
+            return
+        }
         runCatching {
             val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
             val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -811,6 +846,55 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     fun clearUpdateMessage() {
         _updateState.update { it.copy(message = null, checkingError = null) }
+    }
+
+    /** 取消下载：先置标志让 write 循环退出，再取消协程；已下完的文件不动。 */
+    fun cancelDownload() {
+        downloadCancelled = true
+        downloadJob?.cancel()
+        downloadJob = null
+        _updateState.update {
+            it.copy(downloading = false, progress = 0f, message = "已取消下载")
+        }
+    }
+
+    /** 删除已下载的安装包（清缓存、换版本时用）。 */
+    fun deleteDownloadedUpdate() {
+        val path = _updateState.value.downloadedPath
+        if (path.isNullOrBlank()) {
+            _updateState.update { it.copy(message = "没有已下载的安装包") }
+            return
+        }
+        val deleted = runCatching { File(path).delete() }.getOrDefault(false)
+        _updateState.update {
+            it.copy(
+                downloadedPath = null,
+                progress = 0f,
+                message = if (deleted) "已删除安装包" else "删除安装包失败（文件可能已被系统清理）",
+            )
+        }
+    }
+
+    /**
+     * 跳到本应用的「安装未知应用」系统页。
+     *
+     * 直接把用户送到 Eropic 自己的授权页（带 package uri），而不是「所有应用」列表，
+     * 少走一步；个别 ROM 不认带包的 uri 时回退到总列表。
+     */
+    fun openInstallPermissionSettings() {
+        val context = container.appContext
+        val withPackage = Intent(
+            android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+            Uri.parse("package:" + context.packageName),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val fallback = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val started = runCatching { context.startActivity(withPackage); true }
+            .recoverCatching { context.startActivity(fallback); true }
+            .getOrDefault(false)
+        if (!started) {
+            postMessage("无法打开系统设置，请手动到「设置 → 应用 → Eropic → 安装未知应用」打开")
+        }
     }
 
     // ---- v0.2：识图（本地相似图检索 + 联网以图搜图） ----
@@ -859,10 +943,20 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         if (similaritySourceId != null || similaritySourceUri != null) runSimilaritySearch()
     }
 
+    /**
+     * 按设置里的「相似度档位」构造查询（v1.0：接上多特征评分）。
+     *
+     * 为什么不再用默认的 SimilarityQuery(keyword=...)：v1.0 换了多特征评分，
+     * 默认下限是 0（为了升级后结果不凭空消失），但那样「综合分 20 的无关图」也会进列表；
+     * 用户在设置里选的严格/标准/宽松（85/70/55）才是真正想要的裁剪线。
+     */
+    private fun currentSimilarityQuery(): SimilarityQuery =
+        SimilarityQuery.atLevel(settings.value.similarity, similarityKeyword)
+
     private fun runSimilaritySearch() {
         viewModelScope.launch {
             _similaritySearching.value = true
-            val query = SimilarityQuery(keyword = similarityKeyword)
+            val query = currentSimilarityQuery()
             val hits = runCatching {
                 val id = similaritySourceId
                 val uri = similaritySourceUri
@@ -910,14 +1004,14 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     suspend fun findCharacterMatchesByMediaId(mediaId: Long): CharacterMatchResult? {
         similaritySourceId = mediaId
         similaritySourceUri = null
-        return imageSearch.findCharacterByMediaId(mediaId, SimilarityQuery(keyword = similarityKeyword))
+        return imageSearch.findCharacterByMediaId(mediaId, currentSimilarityQuery())
     }
 
     /** 与 [findCharacterByUri] 相同，但把结果直接返回给调用方。 */
     suspend fun findCharacterMatchesByUri(uri: Uri): CharacterMatchResult? {
         similaritySourceUri = uri
         similaritySourceId = null
-        return imageSearch.findCharacterByUri(uri, SimilarityQuery(keyword = similarityKeyword))
+        return imageSearch.findCharacterByUri(uri, currentSimilarityQuery())
     }
 
     fun clearCharacterResult() {
@@ -929,7 +1023,7 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
             _characterSearching.value = true
             val id = similaritySourceId
             val uri = similaritySourceUri
-            val query = SimilarityQuery(keyword = similarityKeyword)
+            val query = currentSimilarityQuery()
             _characterResult.value = runCatching {
                 when {
                     id != null -> imageSearch.findCharacterByMediaId(id, query)
@@ -1087,6 +1181,84 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         repository.pagingData(filter = GIF_FILTER, sort = SortOrder.DATE_DESC).cachedIn(viewModelScope)
 
     suspend fun gifIds(): List<Long> = repository.ids(filter = GIF_FILTER, sort = SortOrder.DATE_DESC)
+
+    // ---- v1.0：图库分组标题的真实张数 ----
+
+    /**
+     * 按当前「显示方式（按月/按日）」与「只看收藏」统计每个分组的真实张数与字节数。
+     *
+     * 为什么需要它：图库网格的分组标题是从**已分页加载的行**里拼出来的，
+     * 一屏只加载几百行，标题上写的就是"已加载的张数"——所以打开时显示 800 张，
+     * 手动展开/收起触发重新分组后才凑巧变成真实值（用户反馈的 v0.9 bug）。
+     * 这里直接走一次聚合 SQL，标题永远显示整组真实数量。
+     *
+     * 返回的 key 与 [GalleryDates.groupKeyOf] 一致（"2026-10" / "2026-10-28" / "unknown"）。
+     */
+    suspend fun galleryGroupStats(byDay: Boolean, favoritesOnly: Boolean): List<StatRow> =
+        container.database.mediaDao().let { dao ->
+            if (byDay) dao.galleryDayStats(favoritesOnly) else dao.galleryMonthStats(favoritesOnly)
+        }
+
+    /** 收藏总数（本地 + 系统）：收藏变化时图库分组张数也要跟着刷新。 */
+    val favoriteCount: StateFlow<Int> = container.database.mediaDao().favoriteCountFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    // ---- v1.0：日志打包与分享（开发者定位问题用） ----
+
+    /**
+     * 打包运行日志并拉起系统分享面板。
+     *
+     * 内容由 [io.github.kurumi33.eropic.core.diagnostics.LogCollector] 生成：
+     * 版本/设备/权限/索引统计 + 最近 3 份崩溃日志 + 本应用过滤后的 logcat。
+     * 统计数字在这里算好传进去（诊断模块不依赖 Room，口径集中在仓库层）。
+     * 返回生成的日志文件路径，失败返回 null。
+     */
+    suspend fun collectLogsAndShare(): String? {
+        val context = container.appContext
+        val stats = runCatching { buildLogStats() }.getOrNull()
+        val file = runCatching {
+            io.github.kurumi33.eropic.core.diagnostics.LogCollector.collect(context) { stats ?: "（统计失败）" }
+        }.getOrNull() ?: run {
+            postMessage("日志打包失败，请稍后重试")
+            return null
+        }
+        val shared = runCatching {
+            val intent = io.github.kurumi33.eropic.core.diagnostics.LogCollector.shareIntent(context, file)
+            context.startActivity(
+                Intent.createChooser(intent, "分享 Eropic 日志").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.isSuccess
+        return if (shared) {
+            file.absolutePath
+        } else {
+            postMessage("日志已生成但无法打开分享面板：" + file.absolutePath)
+            file.absolutePath
+        }
+    }
+
+    /** 日志里的统计段：只统计数量，不包含任何媒体路径或图片内容。 */
+    private suspend fun buildLogStats(): String {
+        val dao = container.database.mediaDao()
+        val present = dao.countPresent()
+        val hashed = dao.countHashed()
+        val trashCount = container.trashRepository.count()
+        val groups = container.database.duplicateDao().count()
+        return "图片条目（在场）: " + present + "\n" +
+            "已算指纹: " + hashed + "\n" +
+            "回收站条目: " + trashCount + "\n" +
+            "重复/相似组: " + groups
+    }
+
+    /** 清空已生成的日志文件（崩溃日志按时间保留策略另算，不在这里删）。 */
+    fun clearLogs() {
+        viewModelScope.launch {
+            val removed = runCatching {
+                val dir = File(container.appContext.cacheDir, "logs")
+                (dir.listFiles()?.count { it.delete() } ?: 0)
+            }.getOrDefault(0)
+            postMessage(if (removed > 0) "已删除 " + removed + " 份日志" else "没有可删除的日志")
+        }
+    }
 
     companion object {
         /** v0.8：GIF 视图的固定筛选（mimeType=image/gif），不影响图片索引口径。 */
