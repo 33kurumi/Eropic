@@ -39,3 +39,5 @@ google-services.json
 /.build-*.txt
 # Kotlin 增量编译会话目录
 /.kotlin/
+# 签名口令（本机自用，不提交）
+keystore.properties

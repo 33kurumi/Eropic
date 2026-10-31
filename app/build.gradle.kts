@@ -5,6 +5,8 @@
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+// 注意：脚本里的 `java` 是 Gradle 的 JavaPluginExtension，所以 Properties 必须显式 import。
+import java.util.Properties
 
 val buildTimeMs = System.currentTimeMillis()
 val buildStamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date(buildTimeMs))
@@ -14,14 +16,24 @@ val appVersionName = "1.0.0"
 // 侧载分发需要一个长期稳定的签名（换签名必须卸载重装，用户数据会丢），所以优先用项目根目录的
 // keystore/eropic-release.jks（口令走 gradle.properties 或环境变量，不入库）；
 // 这个文件不存在时（比如 clone 下来第一次构建）回退到 debug 签名，保证 :app:assembleRelease 永远能跑通。
-// 注意：keysore 本身和口令都不要提交到 git。
+// 注意：keystore 本身和口令都不要提交到 git（.gitignore 已排除 *.jks / *.keystore / keystore.properties）。
+// 口令来源优先级：命令行 -P 参数 > keystore.properties（本机文件）> 环境变量。
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.isFile) {
+        keystorePropsFile.inputStream().use { load(it) }
+    }
+}
 val releaseKeystoreFile = rootProject.file("keystore/eropic-release.jks")
 val hasReleaseKeystore = releaseKeystoreFile.isFile
 val releaseStorePassword = (providers.gradleProperty("eropic.storePassword").orNull
+    ?: keystoreProps.getProperty("storePassword")
     ?: System.getenv("EROPIC_STORE_PASSWORD") ?: "")
 val releaseKeyAlias = (providers.gradleProperty("eropic.keyAlias").orNull
+    ?: keystoreProps.getProperty("keyAlias")
     ?: System.getenv("EROPIC_KEY_ALIAS") ?: "eropic")
 val releaseKeyPassword = (providers.gradleProperty("eropic.keyPassword").orNull
+    ?: keystoreProps.getProperty("keyPassword")
     ?: System.getenv("EROPIC_KEY_PASSWORD") ?: releaseStorePassword)
 
 plugins {

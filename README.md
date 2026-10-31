@@ -46,7 +46,7 @@ Kotlin 2.0 · Jetpack Compose（Material 3）· Room · Paging 3 · Coil 3 · Wo
 - 已确认：iQOO Neo8 / Android 15 / 120GB+ / 无 SD 卡；GitHub 开源 + 侧载，不上架；M0 只做图片；最低 Android 12；尽量兼容 ColorOS 等主流 ROM
 - 里程碑：M0 可行性原型 1~2 周 → M1 图库 MVP 3~4 周 → M2 清理核心 3 周 → M3 文件/回收站 2~3 周 → M4 打磨 2 周（合计约 11~14 周）
 - 已明确推迟（不阻塞使用）：真机 10 万张基准（M0-7）、视频查重/清理（A-12 现为「只做浏览」，见上）、类 PhotoPrism 高级筛选 DSL（B-19）、**系统回收站后端（D-08：当前用自建 `卷根/.EropicTrash`，可恢复且不依赖系统 MediaStore 回收站，见 ADR-0013）**、同场景语义相似（CLIP）、TinEye / trace.moe 等需签名或 key 的联网识图服务、视觉细节打磨（等真机体验反馈）
-- 已知实现边界：搜索是 `LIKE '%kw%'` 全表扫描（十万级可接受，不做 FTS）；清理报告里久远/截图/模糊三类统计取自 LIMIT 结果，合计偏小（大图已改全量口径）；批量写操作跑在页面协程里，旋转屏幕会中断；保存筛选只复用关键词条件；联网识图 7 家中 5 家走非官方网页接口，服务端改版可能失效（Google Lens / SauceNAO / ascii2d / IQDB / onegai / Lenso 通常需要代理；onegai / Lenso 还需要临时图床可用）；应用内更新要能访问 `api.github.com`；**release 包目前仍用 debug 签名**（放好 `keystore/eropic-release.jks` 后才形成稳定升级链，否则换签名的包必须卸载重装）；`hash_band` 为空的老索引第一次相似检索会走全表扫描（重新建索引后恢复）
+- 已知实现边界：搜索是 `LIKE '%kw%'` 全表扫描（十万级可接受，不做 FTS）；清理报告里久远/截图/模糊三类统计取自 LIMIT 结果，合计偏小（大图已改全量口径）；批量写操作跑在页面协程里，旋转屏幕会中断；保存筛选只复用关键词条件；联网识图 7 家中 5 家走非官方网页接口，服务端改版可能失效（Google Lens / SauceNAO / ascii2d / IQDB / onegai / Lenso 通常需要代理；onegai / Lenso 还需要临时图床可用）；应用内更新要能访问 `api.github.com`；**release 包已用自建正式签名**（`keystore/eropic-release.jks`，口令在 `keystore.properties`，两者都不入库）；从早期 debug 签名的旧包换过来必须**先卸载再装**，之后同一密钥签名的包才能直接覆盖升级；`hash_band` 为空的老索引第一次相似检索会走全表扫描（重新建索引后恢复）
 
 ## 试跑（当前可用 v1.0.0）
 
@@ -54,18 +54,20 @@ Kotlin 2.0 · Jetpack Compose（Material 3）· Room · Paging 3 · Coil 3 · Wo
 # debug 包（或直接用 Android Studio 的 Run）
 .\gradlew.bat :app:assembleDebug
 
-# release 包（体积更小、无 debug 后缀；没放密钥库时自动用 debug 签名）
+# release 包（体积更小、无 debug 后缀；有 keystore 就自动用正式签名，没有则回退 debug 签名）
 .\gradlew.bat :app:assembleRelease
 
 # 安装到手机（USB 调试已开）；正式分发用 release 包，文件名带构建时间，换一个即可
 adb install -r "app\build\outputs\apk\release\Eropic-release-1.0.0-<构建时间>.apk"
 ```
 
-> APK 名字形如 `Eropic-release-1.0.0-20261031-1600.apk`：带版本与构建时间，手机浏览器不会再把它和旧包当成同一个文件；`versionCode` 就是构建时间戳，装新包会直接覆盖旧包（不用卸载）。
+> APK 名字形如 `Eropic-release-1.0.0-20261031-1627.apk`：带版本与构建时间，手机浏览器不会再把它和旧包当成同一个文件；`versionCode` 就是构建时间戳，**同一签名**的新包会直接覆盖旧包（不用卸载）。从 debug 签名的旧安装换到正式签名必须先 `adb uninstall io.github.kurumi33.eropic`（会清掉应用内的索引/设置，照片与回收站里的文件不受影响）。
 >
 > **想在手机上收到更新提示**：在 GitHub 建一个 Release（tag 形如 `v1.0.0`，说明写更新内容，附件传 `Eropic-release-*.apk`），然后 app 里「设置 → 关于与更新 → 检查更新」就能看到版本、说明、下载进度与「安装」。版本比较用版本名（不是 versionCode）。
 >
-> **打正式 release**：把密钥库放 `keystore/eropic-release.jks`（或用 `-PeropicStoreFile=... -PeropicStorePassword=... -PeropicKeyAlias=... -PeropicKeyPassword=...` 传参），没有就自动用 debug 签名，任何机器都能构建。
+> **正式签名已配好**：密钥库在 `keystore/eropic-release.jks`（别名 `eropic`，RSA 2048，有效期 30 年），口令写在 `keystore.properties`（这两样都在 `.gitignore` 里，别提交、别丢）。构建脚本按「`-P` 参数 → `keystore.properties` → 环境变量」的顺序取口令；换机器时把这两个文件拷过去即可。
+> 证书指纹 SHA-256：`9C:B9:92:CE:8B:94:62:75:11:06:9A:DF:97:5F:9F:77:2F:17:84:31:7E:7F:94:0E:29:69:20:0C:1A:DF:50:A6`，用 `apksigner verify --print-certs` 可核对。
+> **密钥库丢了/口令忘了**：已签名的包将无法再覆盖升级，只能换新 applicationId 或让用户卸载重装。建议把 `keystore/eropic-release.jks` 和口令另存一份（网盘/密码管理器）。
 
 打开后：
 1. 授予「照片和视频 → 允许全部」（只选部分照片会导致图库看起来漏图，页面顶部会提示补授权）。
