@@ -17,7 +17,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -43,9 +42,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.kurumi33.eropic.ui.EropicViewModel
+import io.github.kurumi33.eropic.ui.components.WriteAccessHintInline
+import io.github.kurumi33.eropic.ui.components.openSystemStorageAccessSettings
 import kotlinx.coroutines.launch
 
 /**
@@ -73,6 +75,7 @@ fun FolderActionsSheet(
     onSelect: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val context = LocalContext.current
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -164,23 +167,14 @@ fun FolderActionsSheet(
             )
 
             if (!hasWriteAccess) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "未授予「所有文件访问」权限，暂时不能重命名、更换封面或删除",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                // 整行可点：弹层里拿不到 viewModel，关掉弹层后直接跳系统的「所有文件访问」页。
+                WriteAccessHintInline(
+                    onOpenPermission = {
+                        onDismiss()
+                        openSystemStorageAccessSettings(context)
+                    },
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         }
     }

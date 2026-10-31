@@ -151,6 +151,14 @@ interface MediaDao {
     @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1")
     suspend fun countPresent(): Int
 
+    // ---- v0.8：GIF 独立统计（GIF 仍然是图片，仍参与图片相册/去重，只是多一个聚合视图） ----
+
+    @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1 AND mimeType = 'image/gif'")
+    fun gifCountFlow(): Flow<Int>
+
+    @Query("SELECT COALESCE(SUM(sizeBytes), 0) FROM media_item WHERE isPresent = 1 AND mimeType = 'image/gif'")
+    fun gifBytesFlow(): Flow<Long>
+
     /** 已算过指纹的数量：用于判断上次索引是否被中途打断（已算 > 0 且还有未算 = 被打断）。 */
     @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1 AND signatureVersion > 0")
     suspend fun countHashed(): Int

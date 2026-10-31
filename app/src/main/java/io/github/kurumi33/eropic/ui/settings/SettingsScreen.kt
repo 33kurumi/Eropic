@@ -61,6 +61,7 @@ import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
+import io.github.kurumi33.eropic.ui.components.openSystemStorageAccessSettings
 import io.github.kurumi33.eropic.ui.update.UpdateSection
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -395,6 +396,7 @@ private fun StorageAccessCard(
     hasWriteAccess: Boolean,
     onOpenPermission: () -> Unit,
 ) {
+    val context = LocalContext.current
     // 整块可点：保留原来「点权限区任意位置都进权限说明页」的行为，但不再套一层卡片。
     Column(
         modifier = Modifier
@@ -416,7 +418,16 @@ private fun StorageAccessCard(
             text = "状态：" + if (hasWriteAccess) "已授予" else "未授予",
             style = MaterialTheme.typography.bodyMedium,
         )
-        OutlinedButton(onClick = onOpenPermission) { Text("权限说明与设置") }
+        // 未授权时给「去授权」，已授权时给「去系统设置关闭」：
+        // 以前授权后整个入口消失，用户找不到地方把权限关掉。
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onOpenPermission) {
+                Text(if (hasWriteAccess) "权限说明" else "去授权")
+            }
+            TextButton(onClick = { openSystemStorageAccessSettings(context) }) {
+                Text(if (hasWriteAccess) "去系统设置关闭" else "直接去系统设置")
+            }
+        }
     }
 }
 

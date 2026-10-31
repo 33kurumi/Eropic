@@ -1,6 +1,13 @@
 package io.github.kurumi33.eropic.ui.folders
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,15 +23,23 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -34,6 +49,7 @@ import io.github.kurumi33.eropic.core.folders.FolderNode
 import io.github.kurumi33.eropic.core.media.SortOrder
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.EropicTopBar
+import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
 import io.github.kurumi33.eropic.ui.components.MediaGrid
@@ -48,6 +64,9 @@ import kotlinx.coroutines.launch
  * 核心是「包含子文件夹」开关：关掉只看这一层的照片，打开就把所有子目录里的照片一起显示。
  * 关掉时的结果与目录树上那一行的 directCount 一致；打开时与 totalCount 一致（只算存在的图片）。
  *
+ * v0.8：顶栏「N 张 · X」改用数据库真实统计（分页的 itemCount 只算已加载的页，大文件夹会停在 800）；
+ * 顶部的「包含子文件夹」开关条与子文件夹横条随上滑收起、回到顶部再滑回。
+ *
  * @param initialIncludeSubfolders 外层网格页「包含子文件夹」选择的状态，作为本页初始值；
  *   进入后本页自己记住，不再跟随外层。
  * @param initialSort 外层选择的排序（null = 沿用图库排序），同样只作为初始值。
@@ -55,7 +74,8 @@ import kotlinx.coroutines.launch
  * @param subfolders 本目录的直接子目录（由列表页从目录树直接传过来，不再查库），
  *   用于在图片网格上方渲染「子文件夹」横条；没有子目录时整条不渲染。
  * @param onOpenSubfolder 点横条里的子目录：外层负责把这一层压栈，返回键逐层回退。
- * @param refreshToken 索引刷新标记，变化时子文件夹封面会重新取（列表页传索引完成时间）。
+ * @param refreshToken 索引刷新标记，变化时子文件夹封面与顶栏的真实张数会重新取
+ *   （列表页传索引完成时间）。
  */
 @Composable
 fun FolderDetailScreen(
@@ -99,6 +119,55 @@ fun FolderDetailScreen(
     val items = remember(folderPath, effectiveIncludeSubfolders, activeSort) {
         viewModel.folderMedia(folderPath, effectiveIncludeSubfolders, activeSort)
     }.collectAsLazyPagingItems()
+
+    // 顶栏的「N 张 · X」用数据库里的真实统计。
+    // 不能用 items.itemCount：那是分页已经加载进内存的条数（默认 800 张封顶），
+    // 上千张的文件夹会永远停在 800。切「包含子文件夹」时 key 变了会自动重算。
+    // 统计还没回来时先显示「… 张」，避免先闪一个错的数再跳变。
+    val realCount by produceState<Long?>(
+        null,
+        folderPath,
+        effectiveIncludeSubfolders,
+        refreshToken,
+    ) {
+        value = runCatching {
+            viewModel.folderCount(folderPath, effectiveIncludeSubfolders)
+        }.getOrNull()
+    }
+    val realBytes by produceState<Long?>(
+        null,
+        folderPath,
+        effectiveIncludeSubfolders,
+        refreshToken,
+    ) {
+        value = runCatching {
+            viewModel.folderTotalBytes(folderPath, effectiveIncludeSubfolders)
+        }.getOrNull()
+    }
+
+    // 顶部两条（「包含子文件夹」开关条 + 子文件夹横条）随滚动收起、回顶滑回。
+    // MediaGrid 内部自建 LazyVerticalGrid 且没有暴露 LazyGridState，拿不到
+    // firstVisibleItemIndex，所以这里用嵌套滚动累计「离顶部滚了多远」：
+    // 回顶时累计值归零，两条就重新滑回来。刻意不看 isScrollInProgress ——
+    // 那样滑到中间停住时两条会莫名其妙又冒出来。
+    val hideThresholdPx = with(LocalDensity.current) { 40.dp.toPx() }
+    var scrolledPx by remember { mutableFloatStateOf(0f) }
+    val barsVisible by remember(hideThresholdPx) {
+        derivedStateOf { scrolledPx < hideThresholdPx }
+    }
+    val barsScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                // consumed.y < 0：内容往上走（正在往下翻）；> 0：正在回顶。
+                scrolledPx = (scrolledPx - consumed.y).coerceAtLeast(0f)
+                return Offset.Zero
+            }
+        }
+    }
 
     // 多选时返回键先退出多选，再按一次才回上一页。
     BackHandler {
@@ -148,7 +217,7 @@ fun FolderDetailScreen(
             EropicTopBar(
                 title = folderName,
                 subtitle = modeLabel(folderPath, effectiveIncludeSubfolders) + " · " +
-                    formatCount(items.itemCount.toLong()) + " 张",
+                    folderSummaryLabel(realCount, realBytes),
                 onBack = onBack,
                 actions = {
                     FolderSortMenu(
@@ -157,28 +226,40 @@ fun FolderDetailScreen(
                     )
                 },
             )
-            SubfolderModeBar(
-                includeSubfolders = includeSubfolders,
-                enabled = folderPath.isNotEmpty(),
-                onToggle = { checked ->
-                    includeSubfolders = checked
-                    // 换了一批图片，之前的选择已经没有意义。
-                    selectedIds = emptySet()
-                },
-            )
-            // 本目录的直接子目录横条：继续往下走一层不用退回列表页。
-            // 多选模式下不渲染，避免误触（此时页面顶部是多选顶栏）。
-            SubfolderStrip(
-                subfolders = subfolders,
-                viewModel = viewModel,
-                refreshToken = refreshToken,
-                thumbnailsEnabled = settings.thumbnailCacheEnabled,
-                folderCovers = settings.folderCovers,
-                onOpenSubfolder = onOpenSubfolder,
-            )
+            // 两条一起收起 / 一起滑回；展开与收缩动画同时做大小动画，布局不会突然跳一格。
+            AnimatedVisibility(
+                visible = barsVisible,
+                enter = slideInVertically(initialOffsetY = { -it }) + fadeIn() +
+                    expandVertically(expandFrom = Alignment.Top),
+                exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut() +
+                    shrinkVertically(shrinkTowards = Alignment.Top),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    SubfolderModeBar(
+                        includeSubfolders = includeSubfolders,
+                        enabled = folderPath.isNotEmpty(),
+                        onToggle = { checked ->
+                            includeSubfolders = checked
+                            // 换了一批图片，之前的选择已经没有意义。
+                            selectedIds = emptySet()
+                        },
+                    )
+                    // 本目录的直接子目录横条：继续往下走一层不用退回列表页。
+                    // 多选模式下不渲染，避免误触（此时页面顶部是多选顶栏）。
+                    SubfolderStrip(
+                        subfolders = subfolders,
+                        viewModel = viewModel,
+                        refreshToken = refreshToken,
+                        thumbnailsEnabled = settings.thumbnailCacheEnabled,
+                        folderCovers = settings.folderCovers,
+                        onOpenSubfolder = onOpenSubfolder,
+                    )
+                }
+            }
         }
 
-        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+        // 网格外面挂嵌套滚动：上滑把顶部两条收起来，回顶再滑回来。
+        Box(modifier = Modifier.fillMaxWidth().weight(1f).nestedScroll(barsScrollConnection)) {
             when {
                 items.itemCount > 0 -> MediaGrid(
                     items = items,
@@ -270,6 +351,16 @@ fun FolderDetailScreen(
             onDismiss = { trashTargetIds = null },
         )
     }
+}
+
+/**
+ * 顶栏的「N 张 · X」：数据库里的真实张数 · 总大小。
+ * 统计还没回来时显示省略号，不给一个刚到第一页的分页数糊弄用户。
+ */
+private fun folderSummaryLabel(count: Long?, bytes: Long?): String {
+    val countText = if (count != null) formatCount(count) + " 张" else "… 张"
+    val bytesText = if (bytes != null) formatBytes(bytes) else "…"
+    return countText + " · " + bytesText
 }
 
 /** 顶栏副标题前半段：说明当前是哪种聚合口径。 */

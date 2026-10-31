@@ -7,7 +7,7 @@ package io.github.kurumi33.eropic.core.search
  * - 各家以图搜图都没有对个人开发者开放的官方 API，返回的是 HTML 或半结构化 JSON，
  *   解析逻辑混在联网代码里，一端页面改版就只能靠真机猜；
  * - 抽成「文本 -> 结构化命中」的纯函数后，页面结构变化可以拿固定样例离线复现、离线回归；
- * - UI 只认识 [ParsedHit] 的五个字段，不需要知道 ascii2d 的 div 结构或 IQDB 的表格结构。
+ * - UI 只认识 [ParsedHit] 的几个文本字段，不需要知道 ascii2d 的 div 结构或 IQDB 的表格结构。
  *
  * 约定：输入 null / 空串 / 结构不符时一律返回安全默认值，内部 runCatching 兜底，绝不抛异常；
  * 不发网络请求、不碰文件；相对链接统一补成绝对地址，调用方可以直接交给系统浏览器打开。
@@ -26,6 +26,19 @@ data class ParsedHit(
     val pageUrl: String? = null,
     /** 缩略图直链。 */
     val thumbnailUrl: String? = null,
+    /**
+     * SauceNAO 的 data.characters：人工标注的角色 tag，逗号分隔（"hatsune miku, kagamine rin"）。
+     *
+     * v0.8 起单独带回来，用于「找同角色」的候选投票：标题常常是作品名或画师自拟的句子，
+     * 只有这个字段是「这张图里有谁」的明确标注；其它服务商不提供，保持 null。
+     */
+    val characters: String? = null,
+    /** SauceNAO 的 data.material：作品 / 素材名（"vocaloid"、"touhou"）；没有时为 null。 */
+    val material: String? = null,
+    /** SauceNAO 的 data.creator：画师名；没有时为 null。 */
+    val creator: String? = null,
+    /** 产出该命中的服务商（"SauceNAO" / "ascii2d" / "IQDB"），供角色候选标注来源。 */
+    val source: String? = null,
 )
 
 /**
@@ -47,6 +60,10 @@ object OnlineParsers {
     private const val GOOGLE_BASE = "https://www.google.com"
     private const val ASCII2D_BASE = "https://ascii2d.net"
     private const val IQDB_BASE = "https://iqdb.org"
+
+    private const val SAUCE_NAO_SOURCE = "SauceNAO"
+    private const val ASCII2D_SOURCE = "ascii2d"
+    private const val IQDB_SOURCE = "IQDB"
 
     /**
      * 解析 SauceNAO 的 JSON 响应。
@@ -140,6 +157,11 @@ object OnlineParsers {
             similarity = similarity,
             extUrl = extUrl,
             thumbnailUrl = thumbnailUrl,
+            // 空字符串按「没有」处理：SauceNAO 对不适用本条索引的字段会返回 ""，不是 null
+            characters = nonBlank(JsonScan.asString(JsonScan.field(data, "characters"))),
+            material = nonBlank(JsonScan.asString(JsonScan.field(data, "material"))),
+            creator = nonBlank(JsonScan.asString(JsonScan.field(data, "creator"))),
+            source = SAUCE_NAO_SOURCE,
         )
         return if (hit.hasAnyField()) hit else null
     }
@@ -165,6 +187,7 @@ object OnlineParsers {
                 extUrl = extUrl,
                 pageUrl = HtmlScan.resolveUrl(baseUrl, selfHref),
                 thumbnailUrl = HtmlScan.resolveUrl(baseUrl, HtmlScan.firstImgSrc(region)),
+                source = ASCII2D_SOURCE,
             )
             if (hit.hasAnyField()) hits.add(hit)
         }
@@ -195,6 +218,7 @@ object OnlineParsers {
                 similarity = similarity,
                 extUrl = extUrl,
                 thumbnailUrl = HtmlScan.resolveUrl(baseUrl, HtmlScan.firstImgSrc(row)),
+                source = IQDB_SOURCE,
             )
             if (hit.hasAnyField()) hits.add(hit)
         }
@@ -220,7 +244,12 @@ object OnlineParsers {
 /** 一条命中是否至少有一个可用字段；全空说明这一块不是结果（页头、广告位等）。 */
 private fun ParsedHit.hasAnyField(): Boolean =
     !title.isNullOrBlank() || similarity != null || !extUrl.isNullOrBlank() ||
-        !pageUrl.isNullOrBlank() || !thumbnailUrl.isNullOrBlank()
+        !pageUrl.isNullOrBlank() || !thumbnailUrl.isNullOrBlank() ||
+        !characters.isNullOrBlank() || !material.isNullOrBlank() || !creator.isNullOrBlank()
+
+/** 去掉首尾空白，空串按「没有」处理（SauceNAO 的缺失字段常是 "" 而不是 null）。 */
+private fun nonBlank(value: String?): String? =
+    value?.trim()?.takeIf { it.isNotEmpty() }
 
 /** 取第一个非空白字符串（去掉首尾空白）；全空时返回 null。 */
 private fun firstNonBlank(vararg values: String?): String? {

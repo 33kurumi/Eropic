@@ -124,6 +124,13 @@ fun StorageAccessScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // 用户最关心「不给这个权限还能不能用」，所以单独一行说清楚。
+                    Text(
+                        text = "只读功能不受影响：浏览、搜索、查重、缩略图、存储总览都照常可用，" +
+                            "不需要这个权限。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                     if (hasAccess) {
                         OutlinedButton(onClick = openSystemSettings) {
                             Text("去系统设置修改或关闭")
@@ -133,6 +140,13 @@ fun StorageAccessScreen(
                             Text("去系统设置授权")
                         }
                     }
+                    // 应用内所有「未授予」提示都跳到本页，这里说明一下，避免用户以为被绕了一圈。
+                    Text(
+                        text = "应用里其他位置（回收站、文件夹菜单、清理页、多选菜单）的" +
+                            "「未授予」提示点一下都会回到本页，再从这里去系统设置。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 

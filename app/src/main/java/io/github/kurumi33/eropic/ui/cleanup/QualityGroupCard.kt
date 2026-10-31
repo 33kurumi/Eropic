@@ -38,7 +38,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,8 +48,8 @@ import io.github.kurumi33.eropic.core.cleanup.QualityScore
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.media.MediaUris
-import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.ui.common.formatBytes
+import io.github.kurumi33.eropic.ui.components.WriteAccessHintInline
 import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -86,6 +85,7 @@ fun QualityGroupCard(
     onOpenViewer: (MediaEntity) -> Unit,
     onCompare: () -> Unit,
     hasWriteAccess: Boolean,
+    onOpenPermission: () -> Unit,
 ) {
     // 评分与成员按 id 对齐，再按总分降序：A/B 两栏取前两名，第三张起排成小方块。
     val ranked = remember(members, assessment) {
@@ -102,7 +102,6 @@ fun QualityGroupCard(
         selectedTrashIds.count { it in memberIds }
     }
     val suggestedCount = assessment.trashIds.size
-    val context = LocalContext.current
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -255,15 +254,8 @@ fun QualityGroupCard(
                 }
             }
             if (!hasWriteAccess) {
-                // 点这一行直接跳系统的「所有文件访问」授权页（用户反馈过：别处的授权提示要能点）。
-                Text(
-                    text = "需要「所有文件访问」权限，点这里去授权",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.clickable {
-                        runCatching { context.startActivity(StorageAccess.requestIntent(context)) }
-                    },
-                )
+                // 整行可点：进应用内的权限说明页（用户反馈过：别处的授权提示要能点）。
+                WriteAccessHintInline(onOpenPermission = onOpenPermission)
             }
         }
     }

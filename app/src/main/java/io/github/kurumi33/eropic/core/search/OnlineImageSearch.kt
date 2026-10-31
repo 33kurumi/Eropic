@@ -357,6 +357,9 @@ class OnlineImageSearch(
             extUrl = hit.extUrl,
             pageUrl = hit.pageUrl,
             thumbnailUrl = hit.thumbnailUrl,
+            characters = hit.characters,
+            material = hit.material,
+            creator = hit.creator,
         )
     }
 

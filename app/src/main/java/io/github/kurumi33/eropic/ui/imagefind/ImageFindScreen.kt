@@ -45,6 +45,7 @@ import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.PersonSearch
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.SearchOff
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -113,6 +114,9 @@ private const val MIN_FIND_COLUMNS = 2
 
 /** 捏合列数上限，与设置里的网格列数上限（8）保持一致。 */
 private const val MAX_FIND_COLUMNS = 8
+
+/** 「同角色候选」最多展示几个角色名按钮：取前 5 个最可信的，多了卡片会被挤爆。 */
+private const val MAX_CHARACTER_CHIPS = 5
 
 /**
  * 联网识图的服务商清单直接取枚举自身的顺序（v0.7 起 7 家）：
@@ -320,11 +324,13 @@ fun ImageFindScreen(
 
     // 「找同角色」：user 点按钮才触发。识别服务要上传源图、慢且可能花配额，所以不做自动检索；
     // 结果放在 characterResult 里，网格复用相似结果的实现，点击沿用 onOpenViewer。
-    fun findCharacterMatches() {
+    // [clearPrevious] = true 时先清空旧结果（按钮第一次点击）；
+    // 点角色名再搜时传 false，保留旧卡片直到新结果回来，页面不会闪一下。
+    fun findCharacterMatches(clearPrevious: Boolean = true) {
         val current = source ?: return
         if (characterLoading) return
         characterLoading = true
-        characterResult = null
+        if (clearPrevious) characterResult = null
         scope.launch {
             val result: CharacterMatchResult? = try {
                 when (current) {
@@ -346,6 +352,22 @@ fun ImageFindScreen(
         }
     }
 
+    // 「同角色候选」里点一个角色名：把它当关键词再搜一次。
+    // 复用页面现有的两条管线——关键词交给 ViewModel（内部按上次源图自动重跑本地相似），
+    // 再触发一次同角色识别让候选也按这个名字重新过滤；不另建搜索逻辑。
+    fun searchByCharacterName(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        if (characterLoading) return
+        keywordInput = trimmed
+        appliedKeyword = trimmed
+        focusManager.clearFocus()
+        // setSimilarityKeyword 是同步方法（先记关键词再触发重跑），所以下一行的同角色检索
+        // 一定能读到新关键词，不需要等协程。
+        viewModel.setSimilarityKeyword(trimmed)
+        findCharacterMatches(clearPrevious = false)
+    }
+
     // 统一的外部浏览器入口：打不开就提示，不让页面崩。
     fun openUrl(url: String) {
         if (!openInBrowser(context, url)) {
@@ -365,6 +387,25 @@ fun ImageFindScreen(
         contract = ActivityResultContracts.PickVisualMedia(),
     ) { uri: Uri? ->
         if (uri != null) startLocalSearch(FindSource.DeviceUri(uri))
+    }
+
+    // 「浏览文件…」：OpenDocument 打开的是系统文件选择器（DocumentsUI），自带「最近 / 图片 / 下载 / 设备」
+    // 与侧栏目录浏览，用来选那些不在系统照片库里的图片（比如刚下到「下载」目录的文件）。
+    // 与照片选择器走同一条「按当前 URI 找相似」路径，只是多一步可读性检查：OpenDocument 拿到的 URI
+    // 在个别机型上可能读不了，这时直接提示，不让 ViewModel 里抛异常。
+    val browseFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val readable = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { true } ?: false
+            }.getOrDefault(false)
+            if (readable) {
+                startLocalSearch(FindSource.DeviceUri(uri))
+            } else {
+                viewModel.postMessage("无法读取这张图片，请换一个文件再试")
+            }
+        }
     }
 
     // 关键词 400ms 防抖：输入停顿后才让 ViewModel 重新比对。
@@ -415,6 +456,8 @@ fun ImageFindScreen(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                     )
                 },
+                // DocumentsUI 用 MIME 数组启动；只收图片，避免选到文档后才在解码阶段失败。
+                onBrowseFiles = { browseFileLauncher.launch(arrayOf("image/*")) },
                 onToggleCandidates = { showCandidates = !showCandidates },
                 onPickCandidate = { entity ->
                     showCandidates = false
@@ -437,6 +480,7 @@ fun ImageFindScreen(
                         characterLoading = characterLoading,
                         characterResult = characterResult,
                         onFindCharacter = { findCharacterMatches() },
+                        onPickCharacter = { name -> searchByCharacterName(name) },
                         onClearCharacter = {
                             characterResult = null
                             ImageFindSession.characterResult = null
@@ -478,6 +522,7 @@ private fun LocalFindTab(
     characterLoading: Boolean,
     characterResult: CharacterMatchResult?,
     onFindCharacter: () -> Unit,
+    onPickCharacter: (String) -> Unit,
     onClearCharacter: () -> Unit,
     searching: Boolean,
     columns: Int,
@@ -557,6 +602,7 @@ private fun LocalFindTab(
                 thumbnailsEnabled = thumbnailsEnabled,
                 thumbnailProvider = thumbnailProvider,
                 onOpen = onOpenViewer,
+                onPickCharacter = onPickCharacter,
                 modifier = Modifier.weight(1f),
             )
         } else Box(modifier = Modifier.weight(1f)) {
@@ -593,6 +639,7 @@ private fun SourceGuidance(
     candidates: CandidateState,
     showCandidates: Boolean,
     onPickFromDevice: () -> Unit,
+    onBrowseFiles: () -> Unit,
     onToggleCandidates: () -> Unit,
     onPickCandidate: (MediaEntity) -> Unit,
     entityThumbnail: suspend (MediaEntity) -> File?,
@@ -649,6 +696,22 @@ private fun SourceGuidance(
             Spacer(modifier = Modifier.width(8.dp))
             Text("从设备选图")
         }
+        // v0.8：照片选择器只能看图库里的图，选不到「下载」等目录；这里再给一个系统文件选择器入口。
+        OutlinedButton(
+            onClick = onBrowseFiles,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+        ) {
+            Text("浏览文件…")
+        }
+        Text(
+            text = "「从设备选图」打开系统照片选择器；「浏览文件…」打开系统文件管理器，可以进入下载、U 盘等任意目录挑图。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp),
+        )
         OutlinedButton(
             onClick = onToggleCandidates,
             modifier = Modifier
@@ -920,11 +983,26 @@ private fun ErrorCard(text: String) {
 }
 
 /**
- * 「同角色候选」卡片：顶部写清识别依据（roleHint + source），下面网格展示 localMatches。
+ * 候选角色的相似度：core 给的 score 可能是 0..1 的权重，也可能是 0..100 的百分比，
+ * 这里按「≤1 视为 0..1」统一换算；拿不到有效分数就返回 null（不显示），避免出现 "0%" 这种迷惑数字。
+ */
+private fun candidatePercent(score: Double): String? {
+    if (score.isNaN() || score <= 0.0) return null
+    val percent = if (score <= 1.0) score * 100.0 else score
+    return String.format(Locale.US, "%.0f%%", percent.coerceIn(0.0, 100.0))
+}
+
+/**
+ * 「同角色候选」卡片：顶部写清识别依据（roleHint + 来源 + 角色名候选 + 依据），下面网格展示 localMatches。
+ *
+ * v0.8 起联网识别会带回 [CharacterMatchResult.candidates]（角色名候选，按可信度排序）与
+ * [CharacterMatchResult.basis]（依据逐条说明）。候选做成 chip：点一下就把该名字当关键词再搜，
+ * 相当于「我觉得是这个人，按这个名字再看一遍」。
  *
  * 网格复用本地相似结果的实现（同样支持捏合改列数）；点任意一张就带着整个候选集合打开查看器，
  * 这样在查看器里可以一直翻到下一个同角色候选，而不是只翻当前屏幕。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CharacterMatchCard(
     result: CharacterMatchResult,
@@ -933,6 +1011,7 @@ private fun CharacterMatchCard(
     thumbnailsEnabled: Boolean,
     thumbnailProvider: suspend (Long) -> File?,
     onOpen: (List<Long>, Int) -> Unit,
+    onPickCharacter: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
@@ -950,12 +1029,83 @@ private fun CharacterMatchCard(
                     text = result.roleHint?.takeIf { it.isNotBlank() } ?: "按画面特征找到的相近图片",
                     style = MaterialTheme.typography.titleSmall,
                 )
-                Text(
-                    text = "识别依据：" + result.source,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
+                // 只显示参考图的文件名：result.source 是 SimilarImageHit?，直接拼进文案会变成 data class 的 toString，读起来很糟。
+                result.source?.displayName?.takeIf { it.isNotBlank() }?.let { sourceName ->
+                    Text(
+                        text = "参考图：$sourceName",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                // 角色名候选：前 5 个按可信度排序，点一下就把名字填进关键词再搜（本地相似 + 同角色都会重跑）。
+                if (result.candidates.isNotEmpty()) {
+                    Text(
+                        text = "识别到的角色（点一下按这个名字再搜）",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        result.candidates.take(MAX_CHARACTER_CHIPS).forEach { candidate ->
+                            AssistChip(
+                                onClick = { onPickCharacter(candidate.name) },
+                                label = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = candidate.name,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        candidatePercent(candidate.score)?.let { percent ->
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = percent,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+
+                // 识别依据：一行一条，解释「为什么觉得是同一个人」，让用户自己能判断可信度。
+                if (result.basis.isNotEmpty()) {
+                    Text(
+                        text = "识别依据",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                    result.basis.forEach { line ->
+                        if (line.isNotBlank()) {
+                            Text(
+                                text = "• " + line,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                    }
+                }
+
+                // 算法层的说明（有没有联网、拿没拿到角色名）——有才显示，避免空行。
+                val message = result.message?.takeIf { it.isNotBlank() }
+                if (message != null) {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+
                 Text(
                     text = "共 " + result.localMatches.size + " 张候选 · 点开可在查看器里左右翻看",
                     style = MaterialTheme.typography.bodySmall,

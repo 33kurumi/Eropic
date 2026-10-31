@@ -30,9 +30,11 @@ import kotlinx.coroutines.withContext
  * - **颜色画像精排**：哈希只描述结构，二次元图换配色后距离会很大。对哈希粗筛出来的前 [REFINE_LIMIT] 条
  *   再解码一次算 [ColorProfile]，用 [VisualSimilarity.combinedScore] 重排。
  *   为什么只精排前 N 条：解码是全流程最贵的操作，全库精排等于把「以图搜图」变成几分钟的任务。
- * - **找同角色**：先联网问 SauceNAO / ascii2d「这是谁」，再拿返回的标题当角色线索，
- *   配合本地颜色/结构相似度给出候选集（见 [findCharacterByUri] / [findCharacterByMediaId]）。
- *   联网拿不到角色名时仍然返回本地排序结果，只是 [CharacterMatchResult.message] 会说明这一点。
+ * - **找同角色**：先联网问 SauceNAO / ascii2d「这是谁」，把 data.characters / material / title
+ *   拆成角色名候选并加权投票（[CharacterRecognizer]），配合本地颜色/结构相似度给出候选集
+ *   （见 [findCharacterByUri] / [findCharacterByMediaId]）。v0.8 之前只取第一条标题，经常给出
+ *   与角色无关的作品名，用户反馈「找同角色不太行」就是这个问题。
+ *   联网拿不到角色信息时仍然返回本地排序结果，只是 [CharacterMatchResult.message] 会说明这一点。
  */
 class ImageSearchRepository(
     context: Context,
@@ -134,43 +136,103 @@ class ImageSearchRepository(
             emptyList()
         }
 
-        val roleHint = runCatching { onlineRoleHint(sourceUri) }.getOrNull()
+        val evidence = runCatching { onlineCharacterEvidence(sourceUri) }.getOrElse { CharacterEvidence() }
+        val candidates = evidence.candidates
+        val roleHint = candidates.firstOrNull()?.name?.take(ROLE_HINT_MAX_CHARS)
+        // 依据拼成一句跟在结论后面；没有依据时不要留下「（依据：）」这种残句
+        val basisText = evidence.basis.joinToString("；").takeIf { it.isNotEmpty() }
         val message = when {
-            roleHint?.hint != null ->
-                "联网识图识别为「" + roleHint.hint + "」，以下按颜色与画面结构相似度排序"
-            roleHint?.tried == true ->
-                "联网识图没有给出角色名（命中里没有标题），以下按颜色与画面结构相似度排序"
+            roleHint != null && candidates.size == 1 ->
+                "识别为「" + roleHint + "」" + suffix(basisText) + "，以下按颜色与画面结构相似度排序"
+            roleHint != null ->
+                "只能给出候选：" + candidates.take(3).joinToString("、") { it.name } +
+                    suffix(basisText) + "，以下按颜色与画面结构相似度排序"
+            evidence.tried ->
+                "联网没有给出角色信息，以下按本地颜色与画面结构排序"
             else ->
-                "没有联网（或联网失败），以下只按本地颜色与画面结构相似度排序"
+                "没有联网（或联网失败），以下只按本地颜色与画面结构排序"
         }
         return CharacterMatchResult(
             source = sourceHit ?: localMatches.firstOrNull(),
             localMatches = localMatches,
-            roleHint = roleHint?.hint,
+            roleHint = roleHint,
             message = message,
-            onlineUsed = roleHint?.tried == true,
+            onlineUsed = evidence.tried,
+            candidates = candidates,
+            basis = evidence.basis,
+        )
+    }
+
+    /** 文案里的「（依据：…）」后缀；没有依据时返回空串。 */
+    private fun suffix(basisText: String?): String = if (basisText == null) "" else "（依据：" + basisText + "）"
+
+    /**
+     * 联网收集角色证据：**两家都问**（SauceNAO + ascii2d），把全部命中交给 [CharacterRecognizer] 投票。
+     *
+     * 为什么不再「拿到第一个标题就返回」：一条标题的可靠性完全取决于服务商返回顺序，
+     * 而 SauceNAO 的 data.characters 是人工标注，多问一家、多收几条命中的边际成本只是几秒网络，
+     * 换来的却是「3 条说同一个角色」这种可解释的依据。
+     * 任何一家失败都不影响另一家：联网失败是常态，最终只是少几条证据。
+     */
+    private suspend fun onlineCharacterEvidence(uri: Uri?): CharacterEvidence {
+        val search = onlineImageSearch ?: return CharacterEvidence()
+        if (uri == null) return CharacterEvidence()
+        val hits = ArrayList<ParsedHit>(8)
+        for (provider in ROLE_HINT_PROVIDERS) {
+            val result = runCatching { search.search(uri, provider) }.getOrNull() ?: continue
+            if (!result.ok) continue
+            for (item in result.items) {
+                hits += ParsedHit(
+                    title = item.title,
+                    similarity = item.similarity,
+                    extUrl = item.extUrl,
+                    pageUrl = item.pageUrl,
+                    thumbnailUrl = item.thumbnailUrl,
+                    characters = item.characters,
+                    material = item.material,
+                    creator = item.creator,
+                    // provider.label 恰好是 "SauceNAO" / "ascii2d"，[CharacterRecognizer] 直接用它标来源
+                    source = provider.label,
+                )
+            }
+        }
+        if (hits.isEmpty()) return CharacterEvidence(tried = true)
+        val candidates = CharacterRecognizer.candidates(hits)
+        return CharacterEvidence(
+            tried = true,
+            candidates = candidates,
+            basis = buildBasis(hits, candidates),
         )
     }
 
     /**
-     * 联网识别角色名：依次问 SauceNAO、ascii2d，取第一个非空标题当线索。
+     * 生成「识别依据」：只写**能从命中里数出来**的事实，不写推测。
      *
-     * 为什么只取标题：SauceNAO 的 data.title 通常是角色名/作品名（pixiv 的「キャラ名」tag），
-     * ascii2d 的 h6 链接文本是作品页标题；两者都足够给用户一个「这是谁」的提示，
-     * 再深的解析（作者、tag 列表）对「找同角色」没有额外收益，反而更容易随页面改版失效。
+     * 三档证据按可信度排列：角色标注命中条数 > ascii2d 标题提及 > 作品线索。
+     * top 为空（只有作品名、没有角色标注）时仍然给作品线索，让用户至少知道这张图属于哪个系列。
      */
-    private suspend fun onlineRoleHint(uri: Uri?): RoleHint {
-        val search = onlineImageSearch ?: return RoleHint(tried = false)
-        if (uri == null) return RoleHint(tried = false)
-        for (provider in ROLE_HINT_PROVIDERS) {
-            val result = runCatching { search.search(uri, provider) }.getOrNull() ?: continue
-            if (!result.ok) continue
-            val title = result.items.asSequence()
-                .mapNotNull { it.title?.trim() }
-                .firstOrNull { it.isNotEmpty() }
-            if (title != null) return RoleHint(tried = true, hint = title.take(ROLE_HINT_MAX_CHARS))
+    private fun buildBasis(hits: List<ParsedHit>, candidates: List<CharacterCandidate>): List<String> {
+        val basis = ArrayList<String>(3)
+        val top = candidates.firstOrNull()
+        if (top != null) {
+            val sauceHits = hits.count { it.source == SAUCE_NAO_LABEL }
+            val annotated = hits.count { hit ->
+                CharacterRecognizer.splitNames(hit.characters).any { it.equals(top.name, ignoreCase = true) }
+            }
+            if (annotated > 0) {
+                basis += "SauceNAO 命中 " + sauceHits + " 条，其中 " + annotated + " 条标注角色为「" + top.name + "」"
+            }
+            val mentionedByAscii2d = hits.any { hit ->
+                hit.source == ASCII2D_LABEL && hit.title?.contains(top.name, ignoreCase = true) == true
+            }
+            if (mentionedByAscii2d) basis += "ascii2d 标题出现「" + top.name + "」"
         }
-        return RoleHint(tried = true)
+        val material = CharacterRecognizer.topMaterial(hits)
+        if (!material.isNullOrBlank()) basis += "作品线索：" + material
+        if (basis.isEmpty()) {
+            basis += if (hits.isEmpty()) "联网没有返回可用结果" else "联网命中 " + hits.size + " 条，但没有角色标注"
+        }
+        return basis
     }
 
     /** 源图指纹；实体里已有就直接用，省一次解码。 */
@@ -354,9 +416,11 @@ class ImageSearchRepository(
         val profile: ColorProfile? = null,
     )
 
-    private data class RoleHint(
+    /** 一次联网得到的角色证据；[tried] 表示确实发出过请求（即使没结果）。 */
+    private data class CharacterEvidence(
         val tried: Boolean = false,
-        val hint: String? = null,
+        val candidates: List<CharacterCandidate> = emptyList(),
+        val basis: List<String> = emptyList(),
     )
 
     private companion object {
@@ -377,6 +441,10 @@ class ImageSearchRepository(
 
         /** 角色名提示最多显示多少字：标题过长会撑坏卡片。 */
         const val ROLE_HINT_MAX_CHARS = 40
+
+        /** 与服务商 label 一致，用于在依据里区分「谁提供了角色标注」。 */
+        const val SAUCE_NAO_LABEL = "SauceNAO"
+        const val ASCII2D_LABEL = "ascii2d"
 
         /** 角色识别只问这两家：SauceNAO 二次元索引最全，ascii2d 是它的匿名补充。 */
         val ROLE_HINT_PROVIDERS = listOf(

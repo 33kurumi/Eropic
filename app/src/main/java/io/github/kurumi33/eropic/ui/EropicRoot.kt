@@ -62,6 +62,8 @@ import io.github.kurumi33.eropic.ui.folders.FoldersSection
 import io.github.kurumi33.eropic.ui.gallery.GalleryScreen
 import io.github.kurumi33.eropic.ui.history.OperationHistoryScreen
 import io.github.kurumi33.eropic.ui.folders.FolderCoverScreen
+import io.github.kurumi33.eropic.ui.folders.GifListScreen
+import io.github.kurumi33.eropic.ui.folders.VideoListScreen
 import io.github.kurumi33.eropic.ui.imagefind.ImageFindScreen
 import io.github.kurumi33.eropic.ui.permission.MediaPermissions
 import io.github.kurumi33.eropic.ui.permission.PermissionScreen
@@ -223,6 +225,9 @@ fun EropicRoot(viewModel: EropicViewModel) {
                         viewModel = viewModel,
                         onOpenViewer = viewModel::openViewer,
                         hasWriteAccess = hasWriteAccess,
+                        // v0.8：文件夹页底部的两个虚拟文件夹（视频/GIF）走二级页。
+                        onOpenVideos = { viewModel.openScreen(AppScreen.Videos) },
+                        onOpenGifs = { viewModel.openScreen(AppScreen.Gifs) },
                     )
                     2 -> CleanupScreen(
                         viewModel = viewModel,
@@ -289,6 +294,15 @@ fun EropicRoot(viewModel: EropicViewModel) {
                             onBack = closeScreen,
                         )
                         AppScreen.ImageFind -> ImageFindScreen(
+                            viewModel = viewModel,
+                            onBack = closeScreen,
+                            onOpenViewer = viewModel::openViewer,
+                        )
+                        AppScreen.Videos -> VideoListScreen(
+                            viewModel = viewModel,
+                            onBack = closeScreen,
+                        )
+                        AppScreen.Gifs -> GifListScreen(
                             viewModel = viewModel,
                             onBack = closeScreen,
                             onOpenViewer = viewModel::openViewer,

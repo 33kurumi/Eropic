@@ -100,6 +100,27 @@ fun GalleryScreen(
     // 「全部收起」直接把它整体当成折叠集合，不用自己再算一遍日期分组。
     var visibleGroupKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
 
+    // 全局收起模式：一旦打开，之后懒加载出来的分组也必须是收起的。
+    // 不能只把"当前已加载的键"塞进 collapsedGroupKeys —— 新分组的键根本不在那个集合里，
+    // 用户往下滑，新出现的时间段就是展开的（v0.7 的问题）。
+    var collapseAll by rememberSaveable { mutableStateOf(false) }
+    // 全局收起期间被用户手动点开的单个分组：它从有效折叠集合里减掉，其它新分组仍然保持收起。
+    var expandedUnderCollapseAll by rememberSaveable(stateSaver = CollapsedKeysSaver) {
+        mutableStateOf<Set<String>>(emptySet())
+    }
+    // 真正传给网格的折叠集合：
+    // - 全局收起时 = 所有已加载分组 - 手动展开的 → 后加载的键一进 visibleGroupKeys 就自动折叠；
+    // - 否则 = 用户逐个点出来的折叠键。
+    // 放在 remember 里算（它同时是网格 rows 的 remember 输入，每次重组 new 一个 Set 会白算）。
+    val effectiveCollapsedKeys = remember(
+        visibleGroupKeys,
+        collapseAll,
+        expandedUnderCollapseAll,
+        collapsedGroupKeys,
+    ) {
+        if (collapseAll) visibleGroupKeys - expandedUnderCollapseAll else collapsedGroupKeys
+    }
+
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val selectionActive = selectedIds.isNotEmpty()
     // 切换"全部/收藏"会换掉整个数据集：不清空选择的话，批量移动/删除会作用到当前看不见的图片。
@@ -260,6 +281,14 @@ fun GalleryScreen(
                                         }
                                     },
                                     onClick = {
+                                        if (mode != settings.dateGroupMode) {
+                                            // 换显示方式等于换了一整套分组键（月键/日键/无键）：
+                                            // 旧的折叠与「全局收起」记录全部作废，否则会把收起状态
+                                            // 莫名其妙带到新分组上。点当前档不重置，避免误触把展开态清掉。
+                                            collapsedGroupKeys = emptySet()
+                                            expandedUnderCollapseAll = emptySet()
+                                            collapseAll = false
+                                        }
                                         viewModel.setDateGroupMode(mode)
                                         groupMenuOpen = false
                                     },
@@ -267,13 +296,15 @@ fun GalleryScreen(
                             }
                             HorizontalDivider()
                             // 一键展开/收起所有分组：不分组时没有标题行，两项都置灰。
-                            // 收起用 visibleGroupKeys（网格回报的真实键），而不是按日期自己拼，
-                            // 否则非时间排序下带"#段号"的键对不上，收起会没反应。
+                            // 「全部收起」改的是 collapseAll 这个开关，而不是「当前已加载的键」：
+                            // 之后分页新加载出来的月份也会被算进有效折叠集合，不会再滑着滑着展开。
                             DropdownMenuItem(
                                 text = { Text("全部展开") },
                                 enabled = settings.dateGroupMode != DateGroupMode.NONE,
                                 onClick = {
+                                    collapseAll = false
                                     collapsedGroupKeys = emptySet()
+                                    expandedUnderCollapseAll = emptySet()
                                     groupMenuOpen = false
                                 },
                             )
@@ -282,7 +313,9 @@ fun GalleryScreen(
                                 enabled = settings.dateGroupMode != DateGroupMode.NONE &&
                                     visibleGroupKeys.isNotEmpty(),
                                 onClick = {
-                                    collapsedGroupKeys = visibleGroupKeys
+                                    collapseAll = true
+                                    expandedUnderCollapseAll = emptySet()
+                                    collapsedGroupKeys = emptySet()
                                     groupMenuOpen = false
                                 },
                             )
@@ -330,12 +363,23 @@ fun GalleryScreen(
                     // 只有按拍摄时间排序时同一月份才连续；其它排序下每个"月份段"各给一个标题
                     // （键里带段号，避免 LazyGrid 重复 key 崩溃）。
                     dateSorted = sortOrder == SortOrder.DATE_DESC || sortOrder == SortOrder.DATE_ASC,
-                    collapsedKeys = collapsedGroupKeys,
+                    collapsedKeys = effectiveCollapsedKeys,
+                    // 单组点击：全局收起期间记在 expandedUnderCollapseAll（手动展开的白名单），
+                    // 否则沿用原来的 collapsedGroupKeys 逐个 toggle。
                     onToggleGroup = { key ->
-                        collapsedGroupKeys = if (key in collapsedGroupKeys) {
-                            collapsedGroupKeys - key
+                        if (collapseAll) {
+                            expandedUnderCollapseAll =
+                                if (key in expandedUnderCollapseAll) {
+                                    expandedUnderCollapseAll - key
+                                } else {
+                                    expandedUnderCollapseAll + key
+                                }
                         } else {
-                            collapsedGroupKeys + key
+                            collapsedGroupKeys = if (key in collapsedGroupKeys) {
+                                collapsedGroupKeys - key
+                            } else {
+                                collapsedGroupKeys + key
+                            }
                         }
                     },
                     columns = columns,

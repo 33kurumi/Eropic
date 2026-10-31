@@ -2,6 +2,7 @@ package io.github.kurumi33.eropic.ui.folders
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,7 +22,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
@@ -92,6 +95,17 @@ internal fun FolderGridScreen(
     onShowActions: (FolderNode) -> Unit,
     onUp: () -> Unit,
     onSwitchToList: () -> Unit,
+    // v0.8 多选：状态由 FoldersSection 持有，与列表页各自独立。
+    selecting: Boolean,
+    selectedPaths: List<String>,
+    hasWriteAccess: Boolean,
+    onEnterSelection: (String) -> Unit,
+    onToggleSelect: (String) -> Unit,
+    onExitSelection: () -> Unit,
+    onSelectAll: (List<String>) -> Unit,
+    onPinSelected: () -> Unit,
+    onUnpinSelected: () -> Unit,
+    onTrashSelected: () -> Unit,
 ) {
     val context = LocalContext.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -101,6 +115,7 @@ internal fun FolderGridScreen(
         if (path.isEmpty()) tree else findFolderNode(tree, path)?.children.orEmpty()
     }
     val pinnedPaths = remember(settings.pinnedFolders) { pinnedPathSet(settings.pinnedFolders) }
+    val selectedSet = remember(selectedPaths) { selectedPaths.toSet() }
     // 置顶的目录排前面，与列表模式保持同一种顺序。
     val ordered = remember(nodes, pinnedPaths) { orderPinnedFolders(nodes, pinnedPaths) }
     // 「包含子文件夹」只影响后续打开的文件夹，以及这里显示的张数统计口径。
@@ -121,47 +136,66 @@ internal fun FolderGridScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        EropicTopBar(
-            title = folderNameOf(tree, path),
-            subtitle = formatCount(ordered.size.toLong()) + " 个子文件夹 · " +
-                formatCount(stats.count) + " 张",
-            onBack = if (path.isNotEmpty()) onUp else null,
-            actions = {
-                // 搜索入口：与列表模式一致，直接打开搜索页。
-                IconButton(onClick = { viewModel.openScreen(AppScreen.Search) }) {
-                    Icon(
-                        imageVector = Icons.Filled.Search,
-                        contentDescription = "搜索图片",
+        if (selecting) {
+            FolderSelectionBar(
+                count = selectedPaths.size,
+                onClose = onExitSelection,
+                onSelectAll = {
+                    // 「全选」只选这一层看得到的文件夹卡片。
+                    onSelectAll(
+                        ordered
+                            .map { node -> node.path }
+                            .filter { nodePath -> nodePath.isNotEmpty() },
                     )
-                }
-                // 列数缩放：范围与设置页、SettingsRepository 同源（AppSettings 2..8），
-                // 到边界就禁用按钮，避免点了没反应。
-                CompactIconButton(
-                    imageVector = Icons.Filled.Remove,
-                    contentDescription = "减少每行图片列数",
-                    enabled = settings.gridColumns > GRID_COLUMNS_MIN,
-                    onClick = { viewModel.setGridColumns(settings.gridColumns - 1) },
-                )
-                CompactIconButton(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = "增加每行图片列数",
-                    enabled = settings.gridColumns < GRID_COLUMNS_MAX,
-                    onClick = { viewModel.setGridColumns(settings.gridColumns + 1) },
-                )
-                FolderPageMenu(
-                    activeSort = activeSort,
-                    onSortSelected = onSortSelected,
-                    includeSubfolders = includeSubfolders,
-                    onToggleIncludeSubfolders = onToggleIncludeSubfolders,
-                )
-                IconButton(onClick = onSwitchToList) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.List,
-                        contentDescription = "切换为列表视图",
+                },
+                onPin = onPinSelected,
+                onUnpin = onUnpinSelected,
+                onTrash = onTrashSelected,
+                hasWriteAccess = hasWriteAccess,
+            )
+        } else {
+            EropicTopBar(
+                title = folderNameOf(tree, path),
+                subtitle = formatCount(ordered.size.toLong()) + " 个子文件夹 · " +
+                    formatCount(stats.count) + " 张",
+                onBack = if (path.isNotEmpty()) onUp else null,
+                actions = {
+                    // 搜索入口：与列表模式一致，直接打开搜索页。
+                    IconButton(onClick = { viewModel.openScreen(AppScreen.Search) }) {
+                        Icon(
+                            imageVector = Icons.Filled.Search,
+                            contentDescription = "搜索图片",
+                        )
+                    }
+                    // 列数缩放：范围与设置页、SettingsRepository 同源（AppSettings 2..8），
+                    // 到边界就禁用按钮，避免点了没反应。
+                    CompactIconButton(
+                        imageVector = Icons.Filled.Remove,
+                        contentDescription = "减少每行图片列数",
+                        enabled = settings.gridColumns > GRID_COLUMNS_MIN,
+                        onClick = { viewModel.setGridColumns(settings.gridColumns - 1) },
                     )
-                }
-            },
-        )
+                    CompactIconButton(
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = "增加每行图片列数",
+                        enabled = settings.gridColumns < GRID_COLUMNS_MAX,
+                        onClick = { viewModel.setGridColumns(settings.gridColumns + 1) },
+                    )
+                    FolderPageMenu(
+                        activeSort = activeSort,
+                        onSortSelected = onSortSelected,
+                        includeSubfolders = includeSubfolders,
+                        onToggleIncludeSubfolders = onToggleIncludeSubfolders,
+                    )
+                    IconButton(onClick = onSwitchToList) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.List,
+                            contentDescription = "切换为列表视图",
+                        )
+                    }
+                },
+            )
+        }
 
         if (ordered.isEmpty()) {
             EmptySubfolders(
@@ -188,8 +222,27 @@ internal fun FolderGridScreen(
                         coverLoader = coverLoader,
                         viewModel = viewModel,
                         thumbnailsEnabled = thumbnailsEnabled,
-                        onClick = { onOpenFolder(node.path) },
-                        onLongClick = { onShowActions(node) },
+                        selecting = selecting,
+                        selected = node.path in selectedSet,
+                        // 选择模式下点按 / 长按都只切换选中，不再进入目录或弹操作层。
+                        // 根目录是合成节点（path 为空），不可选：非选择模式下长按仍打开操作弹层。
+                        onClick = {
+                            if (!selecting) {
+                                onOpenFolder(node.path)
+                            } else if (node.path.isNotEmpty()) {
+                                onToggleSelect(node.path)
+                            }
+                        },
+                        onLongClick = {
+                            if (selecting) {
+                                if (node.path.isNotEmpty()) onToggleSelect(node.path)
+                            } else if (node.path.isNotEmpty()) {
+                                onEnterSelection(node.path)
+                            } else {
+                                onShowActions(node)
+                            }
+                        },
+                        onShowActions = { onShowActions(node) },
                     )
                 }
             }
@@ -240,8 +293,11 @@ private fun FolderCard(
     coverLoader: FolderCoverLoader?,
     viewModel: EropicViewModel,
     thumbnailsEnabled: Boolean,
+    selecting: Boolean,
+    selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onShowActions: () -> Unit,
 ) {
     // 封面是挂起加载（查 DAO + 生成缩略图），用 produceState 让它随卡片进入组合自动开始。
     val cover by produceState<FolderCover?>(
@@ -266,6 +322,17 @@ private fun FolderCard(
     Column(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
+            .then(
+                if (selected) {
+                    Modifier.border(
+                        width = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(12.dp),
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(bottom = 4.dp),
     ) {
@@ -307,6 +374,43 @@ private fun FolderCard(
                         contentDescription = "已置顶",
                         modifier = Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .background(MaterialTheme.colorScheme.primary, CircleShape)
+                        .padding(3.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = "已选中",
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
+            }
+            // 长按现在用于进入多选，单张卡片的操作弹层改由右下角 ⋮ 打开，功能不丢。
+            // 用 Box + clickable 而不是 IconButton：后者最小 48dp 触控区会撑出封面。
+            if (!selecting) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(4.dp)
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f))
+                        .clickable(onClick = onShowActions),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.MoreVert,
+                        contentDescription = "文件夹操作",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

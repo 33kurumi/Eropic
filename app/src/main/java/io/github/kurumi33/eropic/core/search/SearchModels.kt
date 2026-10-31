@@ -151,6 +151,12 @@ data class OnlineHit(
     val pageUrl: String? = null,
     /** 缩略图地址；App 不加载外链图片，仅保留给「复制链接」用。 */
     val thumbnailUrl: String? = null,
+    /** SauceNAO 的角色标注（逗号分隔）；只有 SauceNAO 给，其它服务商为 null。见 [CharacterRecognizer]。 */
+    val characters: String? = null,
+    /** SauceNAO 的作品 / 素材名（"vocaloid" 等）；没有时为 null。 */
+    val material: String? = null,
+    /** SauceNAO 的画师名；没有时为 null。 */
+    val creator: String? = null,
 )
 
 /**
@@ -170,6 +176,13 @@ data class CharacterMatchResult(
     val message: String? = null,
     /** 是否真的联网问过；false 表示只是本地排序。 */
     val onlineUsed: Boolean = false,
+    /**
+     * 角色名候选（v0.8 起），按加权票数降序；可能为空（离线 / 服务商没给标注）。
+     * [roleHint] 恒等于它的第一条名字，保留旧字段是为了让不关心候选的 UI 少改一处。
+     */
+    val candidates: List<CharacterCandidate> = emptyList(),
+    /** 识别依据，一条一个字符串（"SauceNAO 命中 5 条，其中 3 条标注角色为「xxx」"），可直接展示。 */
+    val basis: List<String> = emptyList(),
 )
 
 /**

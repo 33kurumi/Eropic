@@ -71,19 +71,23 @@ class MediaStoreDataSource(private val context: Context) {
                 // 空字符串与 null 一样视为"没有 DATA"：个别 ROM 会返回 ""，直接当路径用会写出假行。
                 val data = if (cursor.isNull(dataIdx)) null else cursor.getString(dataIdx)?.takeIf { it.isNotBlank() }
                 val name = cursor.getString(nameIdx) ?: "IMG_$id"
-                // DATA 是文件系统里的真实路径，大小写可靠，优先用它反推相对目录；
-                // 只有 DATA 为空时才回落到 RELATIVE_PATH，并按卷根下的真实目录名修正顶层大小写。
-                val relativeFromData = data?.let { StoragePaths.relativePathOf(it) }
-                val relativePath = relativeFromData ?: PathCase.canonicalize(
-                    cursor.getString(relativeIdx) ?: "",
-                    StoragePaths.primaryRoot(),
-                )
-                // DATA 为空时用 File(relativePath, name) 会拼出进程工作目录下的假路径，改用卷根拼接。
-                val path = data ?: File(StoragePaths.primaryRoot(), relativePath + name).absolutePath
+                // DATA 能给出所在卷和相对目录，优先用它；DATA 为空时才回落到 RELATIVE_PATH。
+                //
+                // 注意：模拟存储是大小写不敏感文件系统，DATA 里记录的大小写也可能是写入方随手写的
+                // （"pictures/"），并不等于磁盘上的真实目录名（"Pictures/"）。所以这里不能直接信任
+                // DATA 或 RELATIVE_PATH 的大小写，必须交给 PathCase 逐段对着真实目录名校正，
+                // 否则 pictures 与 Pictures、dcim 与 DCIM 会被拆成两个相册（v0.8 用户反馈）。
+                val volumeRoot = data?.let { StoragePaths.volumeRootOf(it) } ?: StoragePaths.primaryRoot()
+                val rawRelative = data?.let { StoragePaths.relativePathOf(it) }
+                    ?: (cursor.getString(relativeIdx) ?: "")
+                val relativePath = PathCase.canonicalizeDeep(rawRelative, volumeRoot)
+                // 用卷根拼接：DATA 为空时 File(relativePath, name) 会拼出进程工作目录下的假路径。
+                val path = File(volumeRoot, relativePath + name).absolutePath
                 val modifiedSecs = cursor.getLong(modifiedIdx)
                 val taken = cursor.getLong(takenIdx).takeIf { it > 0 } ?: modifiedSecs * 1000
-                val bucketName = cursor.getString(bucketNameIdx)
-                    ?: File(path).parentFile?.name
+                // BUCKET_DISPLAY_NAME 同样可能带旧大小写，优先用校正后的真实父目录名。
+                val parentName = File(path).parentFile?.name
+                val bucketName = parentName ?: cursor.getString(bucketNameIdx)
                     ?: "未知相册"
                 batch.add(
                     MediaEntity(

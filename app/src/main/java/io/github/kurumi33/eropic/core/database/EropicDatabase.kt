@@ -14,6 +14,7 @@ import io.github.kurumi33.eropic.core.database.dao.OperationLogDao
 import io.github.kurumi33.eropic.core.database.dao.PendingSignatureDao
 import io.github.kurumi33.eropic.core.database.dao.SavedFilterDao
 import io.github.kurumi33.eropic.core.database.dao.TrashDao
+import io.github.kurumi33.eropic.core.database.dao.VideoDao
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.DuplicateMemberEntity
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
@@ -22,6 +23,7 @@ import io.github.kurumi33.eropic.core.database.entity.OperationLogEntity
 import io.github.kurumi33.eropic.core.database.entity.PendingSignatureEntity
 import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
 import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
+import io.github.kurumi33.eropic.core.database.entity.VideoEntity
 
 @Database(
     entities = [
@@ -33,8 +35,9 @@ import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
         OperationLogEntity::class,
         SavedFilterEntity::class,
         PendingSignatureEntity::class,
+        VideoEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class EropicDatabase : RoomDatabase() {
@@ -49,6 +52,9 @@ abstract class EropicDatabase : RoomDatabase() {
 
     /** v0.7：待落盘的图片指纹（见 [PendingSignatureEntity]）。 */
     abstract fun pendingSignatureDao(): PendingSignatureDao
+
+    /** v0.8：视频索引（只识别统计，不改动文件位置）。 */
+    abstract fun videoDao(): VideoDao
 
     companion object {
         /**
@@ -136,10 +142,54 @@ abstract class EropicDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5 -> v6：v0.8 新增视频索引表（video_item）。
+         *
+         * 纯新增空表，不碰 media_item，升级后不需要重扫图片。
+         */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `video_item` (" +
+                        "`id` INTEGER NOT NULL, " +
+                        "`displayName` TEXT NOT NULL, " +
+                        "`path` TEXT NOT NULL, " +
+                        "`relativePath` TEXT NOT NULL, " +
+                        "`bucketId` INTEGER NOT NULL, " +
+                        "`bucketName` TEXT, " +
+                        "`mimeType` TEXT NOT NULL, " +
+                        "`sizeBytes` INTEGER NOT NULL, " +
+                        "`durationMs` INTEGER NOT NULL, " +
+                        "`width` INTEGER NOT NULL, " +
+                        "`height` INTEGER NOT NULL, " +
+                        "`dateTakenMs` INTEGER NOT NULL, " +
+                        "`dateModifiedMs` INTEGER NOT NULL, " +
+                        "`isPresent` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_video_item_relativePath` " +
+                        "ON `video_item` (`relativePath`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_video_item_dateTakenMs` " +
+                        "ON `video_item` (`dateTakenMs`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_video_item_sizeBytes` " +
+                        "ON `video_item` (`sizeBytes`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_video_item_isPresent_dateTakenMs` " +
+                        "ON `video_item` (`isPresent`, `dateTakenMs`)",
+                )
+            }
+        }
+
         fun build(context: Context): EropicDatabase =
             Room.databaseBuilder(context, EropicDatabase::class.java, "eropic.db")
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 // 兜底：未来新增版本忘了写迁移时，宁可清库重建也不要让 App 启动即崩。
                 .fallbackToDestructiveMigration()
                 .build()

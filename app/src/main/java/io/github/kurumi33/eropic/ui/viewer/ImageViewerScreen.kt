@@ -200,6 +200,32 @@ fun ImageViewerScreen(
         }
     }
 
+    // 交给任意看图应用打开：与"用系统相册打开"同一个 ACTION_VIEW Intent，
+    // 但套一层系统选择器，让用户自己挑 App（编辑、修图、第三方图库都能选到）。
+    // chooser 本身几乎不会抛异常（没有候选时由系统弹"无应用"），仍兜一层 Toast，
+    // 避免个别 ROM 上 startActivity 直接抛 ActivityNotFoundException 把 App 带崩。
+    val openWithOtherApp: () -> Unit = {
+        val id = currentId
+        if (id != null) {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(MediaUris.of(id), currentEntity?.mimeType ?: "image/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(intent, "用其他应用打开").apply {
+                // 有些机型只对 chooser 这一层的 flag 生效，这里也带上读取权限。
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { context.startActivity(chooser) }
+                .onFailure {
+                    Toast.makeText(
+                        context,
+                        "没有可以打开这张图片的应用",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+        }
+    }
+
     val copyPath: () -> Unit = {
         val path = currentEntity?.path
         if (!path.isNullOrBlank()) {
@@ -301,6 +327,13 @@ fun ImageViewerScreen(
                                 onClick = {
                                     menuOpen = false
                                     openInGallery()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("用其他应用打开…") },
+                                onClick = {
+                                    menuOpen = false
+                                    openWithOtherApp()
                                 },
                             )
                             DropdownMenuItem(

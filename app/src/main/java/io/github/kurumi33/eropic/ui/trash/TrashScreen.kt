@@ -23,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material3.AlertDialog
@@ -40,7 +39,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -61,10 +59,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
+import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
+import io.github.kurumi33.eropic.ui.components.WriteAccessHintBar
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -181,35 +181,12 @@ fun TrashScreen(
             )
 
             // 没有"所有文件访问"时先提示，再把所有写按钮禁用——只有本页需要写盘。
+            // 整条提示都可点（不只是「去授权」三个字）：进应用内的权限说明页，那里再跳系统设置。
             if (!hasWriteAccess) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Info,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                        Text(
-                            text = "未授予「所有文件访问」权限，无法操作文件",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.weight(1f),
-                        )
-                        // 用户反馈过"别处需要授权时点那一处文字应能跳到该设置项"：
-                        // 这里直接进应用内的权限说明页，那里再跳系统设置。
-                        TextButton(onClick = { viewModel.openScreen(io.github.kurumi33.eropic.ui.AppScreen.Permission) }) {
-                            Text("去授权", color = MaterialTheme.colorScheme.onErrorContainer)
-                        }
-                    }
-                }
+                WriteAccessHintBar(
+                    onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
             }
 
             // 四个操作按钮横排在顶部；窄屏可横向滚动，不会被挤成两行。

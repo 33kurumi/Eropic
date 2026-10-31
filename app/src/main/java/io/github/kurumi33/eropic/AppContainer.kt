@@ -22,6 +22,7 @@ import io.github.kurumi33.eropic.core.index.SignatureGenerator
 import io.github.kurumi33.eropic.core.notify.TrashCleanupScheduler
 import io.github.kurumi33.eropic.core.trash.TrashRepository
 import io.github.kurumi33.eropic.core.media.MediaRepository
+import io.github.kurumi33.eropic.core.media.VideoRepository
 import io.github.kurumi33.eropic.core.search.SearchHistoryStore
 import io.github.kurumi33.eropic.core.settings.SettingsRepository
 import io.github.kurumi33.eropic.core.thumb.ThumbnailBackfill
@@ -37,6 +38,9 @@ class AppContainer(context: Context) {
     val searchHistoryStore: SearchHistoryStore = SearchHistoryStore(appContext)
     val thumbnailCache: ThumbnailCache = ThumbnailCache(appContext, appContext.contentResolver)
     val mediaRepository: MediaRepository = MediaRepository(appContext, database)
+
+    /** v0.8：视频独立统计（只识别与计数，不改位置、不参与图片去重）。 */
+    val videoRepository: VideoRepository = VideoRepository(appContext, database)
     val signatureGenerator: SignatureGenerator = SignatureGenerator(appContext.contentResolver, thumbnailCache)
     val duplicateScanner: DuplicateScanner = DuplicateScanner(
         contentResolver = appContext.contentResolver,

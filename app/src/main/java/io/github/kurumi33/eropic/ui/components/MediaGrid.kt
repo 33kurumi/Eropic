@@ -33,6 +33,7 @@ import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.paging.compose.LazyPagingItems
 import coil3.compose.AsyncImage
@@ -359,7 +361,10 @@ fun SelectionTopBar(
     hasWriteAccess: Boolean = true,
     onRename: (() -> Unit)? = null,
     onCopy: (() -> Unit)? = null,
+    // 没传时退回系统设置页，保证「未授权」提示在任何调用方那里都点得动。
+    onOpenPermission: (() -> Unit)? = null,
 ) {
+    val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
         navigationIcon = {
@@ -389,6 +394,22 @@ fun SelectionTopBar(
                         Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "更多操作")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        // 写操作被禁用时不要只置灰：菜单顶部先给一条能点的授权提示。
+                        if (!hasWriteAccess) {
+                            DropdownMenuItem(
+                                text = { Text(WriteAccessHintFullText) },
+                                onClick = {
+                                    menuOpen = false
+                                    val target = onOpenPermission
+                                    if (target != null) {
+                                        target()
+                                    } else {
+                                        openSystemStorageAccessSettings(context)
+                                    }
+                                },
+                            )
+                            HorizontalDivider()
+                        }
                         if (onRename != null) {
                             DropdownMenuItem(
                                 text = { Text("重命名…") },

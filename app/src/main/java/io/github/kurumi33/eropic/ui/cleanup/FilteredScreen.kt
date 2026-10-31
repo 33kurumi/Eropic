@@ -3,6 +3,7 @@ package io.github.kurumi33.eropic.ui.cleanup
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -12,6 +13,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import io.github.kurumi33.eropic.ui.AppScreen
@@ -22,6 +24,7 @@ import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.components.ConfirmDialog
 import io.github.kurumi33.eropic.ui.components.MediaGrid
 import io.github.kurumi33.eropic.ui.components.SelectionTopBar
+import io.github.kurumi33.eropic.ui.components.WriteAccessHintBar
 import io.github.kurumi33.eropic.ui.components.shareImages
 import io.github.kurumi33.eropic.ui.fileops.BatchRenameDialog
 import io.github.kurumi33.eropic.ui.fileops.CopyDialog
@@ -92,12 +95,21 @@ fun FilteredScreen(
                 hasWriteAccess = hasWriteAccess,
                 onRename = { renameTargetIds = selectedIds.toList() },
                 onCopy = { copyTargetIds = selectedIds.toList() },
+                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
             )
         } else {
             EropicTopBar(
                 title = "筛选结果",
                 subtitle = formatCount(items.itemCount.toLong()) + " 张",
                 onBack = onBack,
+            )
+        }
+
+        // 没有写权限时给一条能点的提示：否则用户只看到菜单置灰，找不到授权入口。
+        if (!hasWriteAccess) {
+            WriteAccessHintBar(
+                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             )
         }
 

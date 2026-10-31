@@ -1,6 +1,7 @@
 package io.github.kurumi33.eropic.ui
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
@@ -20,10 +21,12 @@ import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
 import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
+import io.github.kurumi33.eropic.core.database.entity.VideoEntity
 import io.github.kurumi33.eropic.core.fileops.BatchState
 import io.github.kurumi33.eropic.core.fileops.EmptyFolderEntry
 import io.github.kurumi33.eropic.core.fileops.FileOpReport
 import io.github.kurumi33.eropic.core.fileops.MoveResult
+import io.github.kurumi33.eropic.core.fileops.OpFailure
 import io.github.kurumi33.eropic.core.fileops.OperationRecord
 import io.github.kurumi33.eropic.core.fileops.RenamePreview
 import io.github.kurumi33.eropic.core.folders.FolderOpResult
@@ -923,7 +926,98 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
             .getOrElse { OnlineSearchResult(provider, false, null, "联网识图失败：" + (it.message ?: "网络异常")) }
     }
 
+    // ---- v0.8：文件夹真实计数（分页的 itemCount 只是「已加载数」，不能当总数显示） ----
+
+    suspend fun folderCount(relativePath: String, includeSubfolders: Boolean): Long =
+        repository.count(
+            MediaFilter(folders = listOf(relativePath), includeSubfolders = includeSubfolders),
+        )
+
+    suspend fun folderTotalBytes(relativePath: String, includeSubfolders: Boolean): Long =
+        repository.sumSize(
+            MediaFilter(folders = listOf(relativePath), includeSubfolders = includeSubfolders),
+        )
+
+    // ---- v0.8：文件夹长按多选后的批量操作 ----
+
+    /**
+     * 批量把文件夹移入回收站。
+     *
+     * 一个文件夹的操作本身是「把目录下所有图片移入回收站 + 删掉空目录」，没有跨文件夹事务，
+     * 所以这里逐个执行再汇总：成功数、受影响图片数、失败明细都带回给界面做结果提示。
+     * 根目录（空串）不允许删除，列表页已过滤，这里再兜一次底。
+     */
+    suspend fun trashFolders(paths: List<String>): FolderOpResult {
+        val targets = paths.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (targets.isEmpty()) return FolderOpResult(ok = false, message = "没有选中文件夹")
+        var changed = 0
+        var succeeded = 0
+        val failures = mutableListOf<OpFailure>()
+        for (path in targets) {
+            val result = runCatching { container.folderRepository.trashFolder(path) }.getOrNull()
+            if (result == null) {
+                failures += OpFailure(path, "操作失败")
+                continue
+            }
+            changed += result.changed
+            if (result.ok) {
+                succeeded++
+            } else {
+                failures += result.failures.ifEmpty { listOf(OpFailure(path, result.message)) }
+            }
+        }
+        val message = if (failures.isEmpty()) {
+            "已把 " + succeeded + " 个文件夹里的 " + changed + " 张图片移入回收站"
+        } else {
+            "已处理 " + succeeded + "/" + targets.size + " 个文件夹，" + failures.size + " 项失败"
+        }
+        return FolderOpResult(ok = failures.isEmpty(), message = message, changed = changed, failures = failures)
+    }
+
+    /** 批量置顶 / 取消置顶（纯偏好，不碰文件系统）。 */
+    fun setFoldersPinned(paths: List<String>, pinned: Boolean) {
+        val targets = paths.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            targets.forEach { container.folderRepository.setPinned(it, pinned) }
+            postMessage(
+                if (pinned) "已置顶 " + targets.size + " 个文件夹"
+                else "已取消置顶 " + targets.size + " 个文件夹",
+            )
+        }
+    }
+
+    // ---- v0.8：视频 / GIF 独立统计（视频只识别统计，不改变文件位置） ----
+
+    val videoCount: Flow<Int> = container.videoRepository.countFlow()
+    val videoTotalBytes: Flow<Long> = container.videoRepository.totalBytesFlow()
+    val gifCount: Flow<Int> = container.database.mediaDao().gifCountFlow()
+    val gifTotalBytes: Flow<Long> = container.database.mediaDao().gifBytesFlow()
+
+    suspend fun loadVideos(): List<VideoEntity> = container.videoRepository.list()
+
+    /** 视频封面：系统缩略图接口 loadThumbnail，失败返回 null 由界面显示占位图标。 */
+    suspend fun videoThumbnail(id: Long): Bitmap? = container.videoRepository.thumbnail(id)
+
+    /** 手动触发一次视频扫描，返回中文结果提示。 */
+    suspend fun refreshVideos(): String {
+        val result = container.videoRepository.syncFromMediaStore(settings.value.scanScope())
+        return if (result.scanned > 0) {
+            "已索引 " + result.scanned + " 个视频"
+        } else {
+            "没有扫描到视频（检查是否已授予「照片和视频」权限）"
+        }
+    }
+
+    /** GIF 独立视图：GIF 仍然算图片，仍参与相册与去重，只是这里单独列出来。 */
+    fun gifMedia(): Flow<PagingData<MediaEntity>> =
+        repository.pagingData(filter = GIF_FILTER, sort = SortOrder.DATE_DESC).cachedIn(viewModelScope)
+
+    suspend fun gifIds(): List<Long> = repository.ids(filter = GIF_FILTER, sort = SortOrder.DATE_DESC)
+
     companion object {
+        /** v0.8：GIF 视图的固定筛选（mimeType=image/gif），不影响图片索引口径。 */
+        private val GIF_FILTER = MediaFilter(mimeTypes = setOf("image/gif"))
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
             initializer { EropicViewModel(container) }
         }

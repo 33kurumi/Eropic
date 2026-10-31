@@ -58,6 +58,28 @@ class OnlineParsersTest {
     }
 
     @Test
+    fun sauceNao_parsesCharacterMaterialCreator() {
+        val json = """
+            {"header":{"status":0},"results":[
+              {"header":{"similarity":"96.1"},"data":{"characters":"hatsune miku, kagamine rin","material":"vocaloid","creator":"artist_a, artist_b"}},
+              {"header":{"similarity":"70.0"},"data":{"characters":"","material":"  ","creator":"","title":"t"}}
+            ]}
+        """.trimIndent()
+
+        val response = OnlineParsers.sauceNao(json)
+        val first = response.results[0]
+        assertEquals("hatsune miku, kagamine rin", first.characters)
+        assertEquals("vocaloid", first.material)
+        assertEquals("artist_a, artist_b", first.creator)
+        assertEquals("SauceNAO", first.source)
+
+        val second = response.results[1]
+        assertNull("空字符串应归一为 null", second.characters)
+        assertNull("纯空白应归一为 null", second.material)
+        assertNull("空字符串应归一为 null", second.creator)
+    }
+
+    @Test
     fun sauceNao_acceptsNumericSimilarity() {
         val json = """{"header":{"status":0},"results":[{"header":{"similarity":91.25},"data":{"title":"x"}}]}"""
         val response = OnlineParsers.sauceNao(json)

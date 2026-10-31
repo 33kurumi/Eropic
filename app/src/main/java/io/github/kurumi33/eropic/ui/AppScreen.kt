@@ -38,6 +38,12 @@ sealed interface AppScreen {
     /** 识图：本地相似图检索 + 联网以图搜图。 */
     data object ImageFind : AppScreen
 
+    /** v0.8 视频虚拟文件夹（只识别统计，不移动文件）。 */
+    data object Videos : AppScreen
+
+    /** v0.8 GIF 虚拟文件夹（GIF 仍算图片，这里只是单独列出来）。 */
+    data object Gifs : AppScreen
+
     /** 更换图集封面：从该文件夹的图片里挑一张。 */
     data class FolderCover(val relativePath: String) : AppScreen
 

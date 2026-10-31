@@ -1,6 +1,11 @@
 package io.github.kurumi33.eropic.ui.folders
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,11 +40,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -79,6 +86,9 @@ fun FoldersSection(
     viewModel: EropicViewModel,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
     hasWriteAccess: Boolean = false,
+    // v0.8：文件夹树末尾追加两个「虚拟文件夹」入口（视频 / GIF），计数由 SpecialFoldersSection 自己查。
+    onOpenVideos: () -> Unit = {},
+    onOpenGifs: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
 
@@ -125,6 +135,20 @@ fun FoldersSection(
     var renameTarget by remember { mutableStateOf<FolderNode?>(null) }
     var deleteTarget by remember { mutableStateOf<FolderNode?>(null) }
 
+    // ---- v0.8：列表 / 网格各自独立的多选（长按进入，返回键先退出）----
+    // 两份选择状态互不影响：在网格里选了文件夹，切回列表时列表依然是自己的选择。
+    var listSelecting by rememberSaveable { mutableStateOf(false) }
+    var listSelected by rememberSaveable(saver = folderSelectionSaver) {
+        mutableStateOf(emptyList<String>())
+    }
+    var gridSelecting by rememberSaveable { mutableStateOf(false) }
+    var gridSelected by rememberSaveable(saver = folderSelectionSaver) {
+        mutableStateOf(emptyList<String>())
+    }
+    // 批量「移入回收站」的目标：非空时弹二次确认；同时记录是哪一侧发起的，确认后只退出那一侧的选择。
+    var batchTrashPaths by remember { mutableStateOf<List<String>?>(null) }
+    var batchTrashFromGrid by remember { mutableStateOf(false) }
+
     // 目录被删 / 改名后，保存下来的浏览位置可能已经不存在：退回去，避免白屏。
     LaunchedEffect(tree, gridPath) {
         if (gridPath.isNotEmpty() && tree.isNotEmpty() && findFolderNode(tree, gridPath) == null) {
@@ -139,6 +163,70 @@ fun FoldersSection(
             detailStack = valid
             if (valid.isEmpty()) viewingNeedsSelection = false
         }
+    }
+
+    // 目录被删 / 改名后，选中的路径可能已经不在树里：剔掉它们，选择条上的数量才不会虚高。
+    // 树还在加载（空列表）时跳过，避免转屏恢复出来的选择被清空。
+    LaunchedEffect(tree) {
+        if (tree.isEmpty()) return@LaunchedEffect
+        val validList = listSelected.filter { path -> findFolderNode(tree, path) != null }
+        if (validList != listSelected) {
+            listSelected = validList
+            if (validList.isEmpty() && listSelecting) listSelecting = false
+        }
+        val validGrid = gridSelected.filter { path -> findFolderNode(tree, path) != null }
+        if (validGrid != gridSelected) {
+            gridSelected = validGrid
+            if (validGrid.isEmpty() && gridSelecting) gridSelecting = false
+        }
+    }
+
+    /** 选中的路径 → 交给 ViewModel 的相对路径（去掉结尾斜杠、去掉根目录、去掉已经失效的）。 */
+    fun selectedRelativePaths(paths: List<String>): List<String> = paths
+        .filter { path -> path.isNotEmpty() && findFolderNode(tree, path) != null }
+        .map { path -> path.trim('/') }
+        .filter { path -> path.isNotEmpty() }
+
+    fun exitListSelection() {
+        listSelecting = false
+        listSelected = emptyList()
+    }
+
+    fun exitGridSelection() {
+        gridSelecting = false
+        gridSelected = emptyList()
+    }
+
+    fun togglePath(path: String, current: List<String>): List<String> =
+        if (path in current) current - path else current + path
+
+    /** 批量置顶 / 取消置顶：纯偏好设置，不碰文件系统，提示由 ViewModel 统一发。 */
+    fun applyPin(fromGrid: Boolean, pinned: Boolean) {
+        val paths = selectedRelativePaths(if (fromGrid) gridSelected else listSelected)
+        if (paths.isEmpty()) {
+            viewModel.postMessage("选中的文件夹已经不存在了")
+        } else {
+            viewModel.setFoldersPinned(paths, pinned)
+        }
+        if (fromGrid) exitGridSelection() else exitListSelection()
+    }
+
+    /** 批量移入回收站：先弹二次确认，确认后才真正删除。 */
+    fun requestTrash(fromGrid: Boolean) {
+        val paths = selectedRelativePaths(if (fromGrid) gridSelected else listSelected)
+        if (paths.isEmpty()) {
+            viewModel.postMessage("选中的文件夹已经不存在了")
+            if (fromGrid) exitGridSelection() else exitListSelection()
+        } else {
+            batchTrashFromGrid = fromGrid
+            batchTrashPaths = paths
+        }
+    }
+
+    // 多选时系统返回键先退出选择，而不是直接退出页面。
+    BackHandler(enabled = listSelecting || gridSelecting) {
+        exitListSelection()
+        exitGridSelection()
     }
 
     when {
@@ -195,6 +283,20 @@ fun FoldersSection(
             onShowActions = { node -> actionsTarget = node },
             onUp = { parentFolderPath(gridPath)?.let { parent -> gridPath = parent } },
             onSwitchToList = { gridLayout = false },
+            // v0.8 多选：网格页自己一份状态，与列表页互不影响。
+            selecting = gridSelecting,
+            selectedPaths = gridSelected,
+            hasWriteAccess = hasWriteAccess,
+            onEnterSelection = { path ->
+                gridSelecting = true
+                gridSelected = listOf(path)
+            },
+            onToggleSelect = { path -> gridSelected = togglePath(path, gridSelected) },
+            onExitSelection = { exitGridSelection() },
+            onSelectAll = { paths -> gridSelected = paths },
+            onPinSelected = { applyPin(fromGrid = true, pinned = true) },
+            onUnpinSelected = { applyPin(fromGrid = true, pinned = false) },
+            onTrashSelected = { requestTrash(fromGrid = true) },
         )
 
         else -> FolderTreeContent(
@@ -214,10 +316,32 @@ fun FoldersSection(
             onOpenSearch = { viewModel.openScreen(AppScreen.Search) },
             activeSort = activeSort,
             onSortSelected = { order -> sortName = order.name },
+            // v0.8 多选：列表页自己的选择状态。
+            selecting = listSelecting,
+            selectedPaths = listSelected,
+            hasWriteAccess = hasWriteAccess,
+            onEnterSelection = { path ->
+                listSelecting = true
+                listSelected = listOf(path)
+            },
+            onToggleSelect = { path -> listSelected = togglePath(path, listSelected) },
+            onExitSelection = { exitListSelection() },
+            onSelectAll = { paths -> listSelected = paths },
+            onPinSelected = { applyPin(fromGrid = false, pinned = true) },
+            onUnpinSelected = { applyPin(fromGrid = false, pinned = false) },
+            onTrashSelected = { requestTrash(fromGrid = false) },
+            // v0.8：目录树之后跟两个「虚拟文件夹」（视频 / GIF），随列表一起滚动。
+            footer = {
+                SpecialFoldersSection(
+                    viewModel = viewModel,
+                    onOpenVideos = onOpenVideos,
+                    onOpenGifs = onOpenGifs,
+                )
+            },
         )
     }
 
-    // ---- 文件夹操作弹层：网格长按 / 列表行尾 ⋮ 打开 ----
+    // ---- 文件夹操作弹层：网格卡片右下角 ⋮ / 列表行尾 ⋮ 打开 ----
     actionsTarget?.let { node ->
         val relativePath = node.path.trim('/')
         val pinned = relativePath.lowercase() in pinnedPaths
@@ -280,6 +404,28 @@ fun FoldersSection(
             onDismiss = { deleteTarget = null },
         )
     }
+
+    // ---- v0.8：批量移入回收站（二次确认）----
+    batchTrashPaths?.let { paths ->
+        ConfirmDialog(
+            title = "移入回收站",
+            text = "将把 " + paths.size + " 个文件夹（及其中的图片）移入回收站，30 天内可恢复。" +
+                "\n\n目录里的视频等未索引文件不会被删除。",
+            confirmText = "移入回收站",
+            destructive = true,
+            onConfirm = {
+                batchTrashPaths = null
+                if (batchTrashFromGrid) exitGridSelection() else exitListSelection()
+                scope.launch {
+                    val result = viewModel.trashFolders(paths)
+                    viewModel.postMessage(result.message)
+                    // 目录集合变了，重新聚合一次；失效的浏览位置会被上面的 LaunchedEffect 退回。
+                    refreshTick++
+                }
+            },
+            onDismiss = { batchTrashPaths = null },
+        )
+    }
 }
 
 /** 列表模式：目录树 + 顶栏的布局切换按钮。 */
@@ -296,40 +442,73 @@ private fun FolderTreeContent(
     onOpenSearch: () -> Unit,
     activeSort: SortOrder,
     onSortSelected: (SortOrder) -> Unit,
+    // v0.8 多选：选择状态由 FoldersSection 持有，这里只负责画选择条和行上的选中态。
+    selecting: Boolean,
+    selectedPaths: List<String>,
+    hasWriteAccess: Boolean,
+    onEnterSelection: (String) -> Unit,
+    onToggleSelect: (String) -> Unit,
+    onExitSelection: () -> Unit,
+    onSelectAll: (List<String>) -> Unit,
+    onPinSelected: () -> Unit,
+    onUnpinSelected: () -> Unit,
+    onTrashSelected: () -> Unit,
+    // 列表末尾追加的内容：由 FoldersSection 传入「虚拟文件夹」入口，这里只管插进 LazyColumn。
+    footer: @Composable () -> Unit = {},
 ) {
     // 把树按展开状态摊平成一行行：LazyColumn 只组合可见行，展开几千个目录也不卡。
     val visibleNodes = remember(tree, expanded, pinnedPaths) {
         flattenVisible(tree, expanded, pinnedPaths)
     }
+    val selectedSet = remember(selectedPaths) { selectedPaths.toSet() }
     val totalBytes = remember(tree) { tree.sumOf { it.totalBytes } }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        EropicTopBar(
-            title = "文件夹",
-            subtitle = formatCount(tree.size.toLong()) +
-                " 个文件夹 · 合计 " + formatBytes(totalBytes),
-            actions = {
-                FolderPageMenu(
-                    activeSort = activeSort,
-                    onSortSelected = onSortSelected,
-                    // 列表模式本身就是整棵树，不需要「包含子文件夹」这个打开选项。
-                    includeSubfolders = null,
-                    onToggleIncludeSubfolders = {},
-                )
-                IconButton(onClick = onOpenSearch) {
-                    Icon(
-                        imageVector = Icons.Filled.Search,
-                        contentDescription = "搜索图片",
+        if (selecting) {
+            FolderSelectionBar(
+                count = selectedPaths.size,
+                onClose = onExitSelection,
+                onSelectAll = {
+                    // 「全选」只选当前列表里看得到的文件夹：收起的子目录不在可见行里，不算在内。
+                    onSelectAll(
+                        visibleNodes
+                            .map { node -> node.path }
+                            .filter { path -> path.isNotEmpty() },
                     )
-                }
-                IconButton(onClick = onSwitchToGrid) {
-                    Icon(
-                        imageVector = Icons.Filled.GridView,
-                        contentDescription = "切换为网格视图",
+                },
+                onPin = onPinSelected,
+                onUnpin = onUnpinSelected,
+                onTrash = onTrashSelected,
+                hasWriteAccess = hasWriteAccess,
+            )
+        } else {
+            EropicTopBar(
+                title = "文件夹",
+                subtitle = formatCount(tree.size.toLong()) +
+                    " 个文件夹 · 合计 " + formatBytes(totalBytes),
+                actions = {
+                    FolderPageMenu(
+                        activeSort = activeSort,
+                        onSortSelected = onSortSelected,
+                        // 列表模式本身就是整棵树，不需要「包含子文件夹」这个打开选项。
+                        includeSubfolders = null,
+                        onToggleIncludeSubfolders = {},
                     )
-                }
-            },
-        )
+                    IconButton(onClick = onOpenSearch) {
+                        Icon(
+                            imageVector = Icons.Filled.Search,
+                            contentDescription = "搜索图片",
+                        )
+                    }
+                    IconButton(onClick = onSwitchToGrid) {
+                        Icon(
+                            imageVector = Icons.Filled.GridView,
+                            contentDescription = "切换为网格视图",
+                        )
+                    }
+                },
+            )
+        }
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(items = visibleNodes, key = { node -> node.path }) { node ->
                 FolderRowItem(
@@ -338,36 +517,102 @@ private fun FolderTreeContent(
                     showMeta = showMeta,
                     pinned = node.path.isNotEmpty() &&
                         node.path.trim('/').lowercase() in pinnedPaths,
+                    selecting = selecting,
+                    selected = node.path in selectedSet,
                     onToggleExpand = { onToggleExpand(node.path) },
                     onClick = { onOpenFolder(node.path) },
+                    onToggleSelect = { onToggleSelect(node.path) },
+                    onEnterSelection = { onEnterSelection(node.path) },
                     onShowActions = { onShowActions(node) },
                 )
+            }
+            // 多选模式下隐藏：这两个是虚拟入口，不参与文件夹选择。
+            if (!selecting) {
+                item(key = "special-folders") { footer() }
             }
         }
     }
 }
 
-/** 目录树的一行：缩进按深度，文件夹图标左侧是展开箭头，行尾是操作菜单，点击进入图片。 */
+/**
+ * 目录树的一行：缩进按深度，文件夹图标左侧是展开箭头，行尾是操作菜单，点击进入图片。
+ *
+ * v0.8 多选：长按任意一行进入多选（根目录是合成节点，不参与），进入后点按只切换选中；
+ * 左侧的展开箭头换成选中圆点，行尾菜单收起，避免和批量操作混在一起。
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderRowItem(
     node: FolderNode,
     expanded: Boolean,
     showMeta: Boolean,
     pinned: Boolean,
+    selecting: Boolean,
+    selected: Boolean,
     onToggleExpand: () -> Unit,
     onClick: () -> Unit,
+    onToggleSelect: () -> Unit,
+    onEnterSelection: () -> Unit,
     onShowActions: () -> Unit,
 ) {
+    // 根目录没有对应的真实目录，不能批量置顶 / 删除，选择模式下也不给选中态。
+    val selectable = node.path.isNotEmpty()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .then(
+                if (selected) {
+                    Modifier.background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f))
+                } else {
+                    Modifier
+                },
+            )
+            .combinedClickable(
+                onClick = {
+                    if (selecting) {
+                        if (selectable) onToggleSelect()
+                    } else {
+                        onClick()
+                    }
+                },
+                onLongClick = {
+                    if (selectable) {
+                        if (selecting) onToggleSelect() else onEnterSelection()
+                    }
+                },
+            )
             .padding(start = (node.depth * 16).dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 展开箭头放在文件夹图标左边：有子目录才可点，没有子目录时留同宽占位，
+        // 选择模式：左侧固定位置显示选中圆点，避免行尾再挤一个勾选框。
+        // 普通模式：展开箭头放在文件夹图标左边：有子目录才可点，没有子目录时留同宽占位，
         // 这样所有行的文件夹图标左边界都在同一列上，缩进只由深度决定。
-        if (node.children.isNotEmpty()) {
+        if (selecting && selectable) {
+            Box(modifier = Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (selected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (selected) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "已选中",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    }
+                }
+            }
+        } else if (node.children.isNotEmpty()) {
             Box(
                 modifier = Modifier
                     .size(32.dp)
@@ -427,7 +672,10 @@ private fun FolderRowItem(
             }
         }
         // 根目录是合成出来的伪节点，没有改名 / 删除 / 置顶的意义，不给菜单入口。
-        if (node.path.isNotEmpty()) {
+        // 选择模式下收起单行菜单：此时的操作都走顶部的批量选择条。
+        if (selecting) {
+            Spacer(Modifier.width(12.dp))
+        } else if (node.path.isNotEmpty()) {
             IconButton(onClick = onShowActions) {
                 Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "文件夹操作")
             }
@@ -659,3 +907,14 @@ internal fun folderCoverIdOf(folderCovers: Map<String, Long>, path: String): Lon
     folderCovers[key]?.let { return it }
     return folderCovers.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
 }
+
+/**
+ * 多选路径集合的保存器（v0.8）。
+ *
+ * Bundle 只接受 ArrayList<String> 这类可序列化容器，默认的自动保存器存不了 List<String>，
+ * 所以显式转一次：转屏、切 Tab 回来时，列表页 / 网格页的选择都还在。
+ */
+private val folderSelectionSaver = Saver<MutableState<List<String>>, ArrayList<String>>(
+    save = { state -> ArrayList(state.value) },
+    restore = { saved -> mutableStateOf(saved.toList()) },
+)

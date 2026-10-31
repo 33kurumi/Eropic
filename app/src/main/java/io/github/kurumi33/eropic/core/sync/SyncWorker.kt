@@ -36,6 +36,10 @@ class SyncWorker(
             val scope = container.settingsRepository.current().scanScope()
             // 后台任务没有进度 UI，进度回调直接丢弃。
             container.mediaRepository.syncFromMediaStore(scope) { _, _ -> }
+            // v0.8：视频只做索引统计，量级小（几十到几千条），顺带对账即可。
+            // 单独 try：视频权限没给或个别 ROM 的 DURATION 列异常时，不能连累图片同步。
+            runCatching { container.videoRepository.syncFromMediaStore(scope) { _, _ -> } }
+                .onFailure { Log.w(TAG, "视频同步失败（不影响图片同步）", it) }
             Result.success()
         } catch (e: CancellationException) {
             // REPLACE 策略会取消正在跑的旧任务；被取消不是失败，原样抛出交给框架处理。
@@ -59,9 +63,16 @@ class SyncWorker(
      */
     private fun hasMediaReadAccess(): Boolean {
         val context = applicationContext
+        // Android 12 及以下没有 READ_MEDIA_IMAGES，只有 READ_EXTERNAL_STORAGE；
+        // 之前这里无条件查 READ_MEDIA_IMAGES，会让 API 31/32 上的后台同步永远直接成功（等于从不同步）。
+        val fullPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
         val full = ContextCompat.checkSelfPermission(
             context,
-            Manifest.permission.READ_MEDIA_IMAGES,
+            fullPermission,
         ) == PackageManager.PERMISSION_GRANTED
         if (full) return true
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&

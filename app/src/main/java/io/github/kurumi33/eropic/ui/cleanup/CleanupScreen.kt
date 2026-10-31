@@ -1,6 +1,5 @@
 package io.github.kurumi33.eropic.ui.cleanup
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,7 +44,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -59,13 +57,13 @@ import io.github.kurumi33.eropic.core.fileops.FileOpReport
 import io.github.kurumi33.eropic.core.index.IndexPhase
 import io.github.kurumi33.eropic.core.index.IndexState
 import io.github.kurumi33.eropic.core.media.MediaUris
-import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
 import io.github.kurumi33.eropic.ui.common.formatMediaSubtitle
+import io.github.kurumi33.eropic.ui.components.WriteAccessHintInline
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -355,6 +353,7 @@ fun CleanupScreen(
                                 hasWriteAccess = hasWriteAccess,
                                 onSelectAllSuggested = { selectionOverrides.clear() },
                                 onApply = { applyTrash(selectedIds.toList()) },
+                                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
                             )
                         }
                         items(current.groups, key = { it.groupId }) { group ->
@@ -373,6 +372,7 @@ fun CleanupScreen(
                                 onApply = { ids -> applyTrash(ids) },
                                 onOpenViewer = onOpenViewer,
                                 onCompare = { compareGroupId = group.groupId },
+                                onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
                             )
                         }
                     }
@@ -414,8 +414,8 @@ private fun SelectionSummaryBar(
     hasWriteAccess: Boolean,
     onSelectAllSuggested: () -> Unit,
     onApply: () -> Unit,
+    onOpenPermission: () -> Unit,
 ) {
-    val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -458,14 +458,8 @@ private fun SelectionSummaryBar(
                 ) { Text("移入回收站", maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
             if (!hasWriteAccess) {
-                Text(
-                    text = "需要「所有文件访问」权限才能执行删除，点这里去授权",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.clickable {
-                        runCatching { context.startActivity(StorageAccess.requestIntent(context)) }
-                    },
-                )
+                // 置灰按钮旁边给一条能点的说明，点了进应用内的权限页（那里再跳系统设置）。
+                WriteAccessHintInline(onOpenPermission = onOpenPermission)
             }
         }
     }
@@ -554,6 +548,7 @@ private fun GroupItem(
     onApply: (List<Long>) -> Unit,
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
     onCompare: () -> Unit,
+    onOpenPermission: () -> Unit,
 ) {
     val memberIds = remember(members) { members.map { it.id } }
     val groupSelected = remember(selectedIds, memberIds) {
@@ -574,6 +569,7 @@ private fun GroupItem(
         },
         onCompare = onCompare,
         hasWriteAccess = hasWriteAccess,
+        onOpenPermission = onOpenPermission,
     )
 }
 
