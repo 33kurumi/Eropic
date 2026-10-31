@@ -58,9 +58,67 @@ class TrashRepository(
         return StoragePaths.trashDir(root, relative)
     }
 
-    /** 当前设置对应的回收站绝对路径（主存储卷），设置页与回收站页直接展示给用户。 */
+    /**
+     * v0.9：真正可用的回收站目录（可写探测 + 回退链）。
+     *
+     * 用户反馈「个别图片无法移入回收站：无法创建回收站目录」（v0.8）。部分 ROM 上即使已授予
+     * 「所有文件访问」，也可能被拒绝在卷根新建目录（OEM 策略、存储未完全挂载、或用户把目录配置
+     * 到了不可写的位置）。这里按优先级逐个尝试，只有真的能在目录里落一个临时文件才算可用：
+     *   1. 用户配置的目录（默认 <卷根>/.EropicTrash）
+     *   2. <卷根>/.EropicTrash（配置目录不可写时退回默认位置）
+     *   3. 应用外部私有目录 .../Android/data/<pkg>/files/trash（同一卷，rename 依旧瞬移）
+     *   4. 应用内部 filesDir/trash（最保险的兜底）
+     *
+     * 回退是安全的：确实移进某个目录了才写 trash_item，恢复仍按 originalPath 搬回原处。
+     */
+    private suspend fun resolveWritableTrashDir(root: String): TrashDirChoice {
+        val candidates = LinkedHashSet<File>()
+        candidates += resolveTrashDir(root)
+        candidates += StoragePaths.trashDir(root)
+        context.getExternalFilesDir(null)?.let { candidates += File(it, "trash") }
+        candidates += File(context.filesDir, "trash")
+
+        val attempted = mutableListOf<String>()
+        for (dir in candidates) {
+            attempted += dir.absolutePath
+            if (probeWritable(dir)) {
+                return TrashDirChoice(dir = dir, attempted = attempted.toList())
+            }
+        }
+        return TrashDirChoice(dir = null, attempted = attempted.toList())
+    }
+
+    /** 目录存在（或能建出来）且真的能写一个临时文件——只判断 mkdirs 会漏掉「建得出来但写不进」的情况。 */
+    private suspend fun probeWritable(dir: File): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            if (!dir.isDirectory && !dir.mkdirs()) return@runCatching false
+            val probe = File(dir, ".eropic-probe-${System.nanoTime()}.tmp")
+            val created = probe.createNewFile()
+            runCatching { probe.delete() }
+            created
+        }.getOrDefault(false)
+    }
+
+    /** 当前设置对应的回收站绝对路径（主存储卷，未做可写探测），设置页直接展示给用户。 */
     suspend fun configuredTrashDir(): String = withContext(Dispatchers.IO) {
         resolveTrashDir(StoragePaths.primaryRoot()).absolutePath
+    }
+
+    /** v0.9：真正在用的回收站目录（做了可写探测，可能已经回退到别的目录）。 */
+    suspend fun effectiveTrashDir(): String = withContext(Dispatchers.IO) {
+        val primary = StoragePaths.primaryRoot()
+        resolveWritableTrashDir(primary).dir?.absolutePath ?: resolveTrashDir(primary).absolutePath
+    }
+
+    /** v0.9：按优先级尝试过的候选目录（回收站页用它解释「为什么当前目录在这里」）。 */
+    suspend fun trashDirCandidates(): List<String> = withContext(Dispatchers.IO) {
+        val primary = StoragePaths.primaryRoot()
+        val list = LinkedHashSet<String>()
+        list += resolveTrashDir(primary).absolutePath
+        list += StoragePaths.trashDir(primary).absolutePath
+        context.getExternalFilesDir(null)?.let { list += File(it, "trash").absolutePath }
+        list += File(context.filesDir, "trash").absolutePath
+        list.toList()
     }
 
     /**
@@ -118,10 +176,15 @@ class TrashRepository(
                 continue
             }
             val root = StoragePaths.volumeRootOf(entity.path)
-            val trashDir = resolveTrashDir(root)
-            if (!trashDir.exists() && !trashDir.mkdirs()) {
+            val choice = resolveWritableTrashDir(root)
+            val trashDir = choice.dir
+            if (trashDir == null) {
                 failed++
-                failures += OpFailure(entity.displayName, "无法创建回收站目录")
+                // 把尝试过的目录写进失败原因：用户能直接看出是哪个位置不可写。
+                failures += OpFailure(
+                    entity.displayName,
+                    "回收站目录不可写（已尝试 " + choice.attempted.joinToString("、") + "）",
+                )
                 continue
             }
             ensureNoMedia(trashDir)
@@ -219,10 +282,14 @@ class TrashRepository(
                 continue
             }
             val root = StoragePaths.volumeRootOf(ref.path)
-            val trashDir = resolveTrashDir(root)
-            if (!trashDir.exists() && !trashDir.mkdirs()) {
+            val choice = resolveWritableTrashDir(root)
+            val trashDir = choice.dir
+            if (trashDir == null) {
                 failed++
-                failures += OpFailure(ref.displayName, "无法创建回收站目录")
+                failures += OpFailure(
+                    ref.displayName,
+                    "回收站目录不可写（已尝试 " + choice.attempted.joinToString("、") + "）",
+                )
                 continue
             }
             ensureNoMedia(trashDir)
@@ -498,6 +565,14 @@ class TrashRepository(
         const val RETENTION_DAYS = 30
     }
 }
+
+/**
+ * 回收站目录的选择结果。
+ *
+ * [dir] 为空表示所有候选目录都不可写；[attempted] 按尝试顺序记录路径，
+ * 写进失败原因里，用户能直接看出是哪个位置不可写。
+ */
+private data class TrashDirChoice(val dir: File?, val attempted: List<String>)
 
 /** 字节数转人类可读（回收站提示用，避免依赖 UI 层工具）。 */
 internal fun formatBytes(bytes: Long): String {

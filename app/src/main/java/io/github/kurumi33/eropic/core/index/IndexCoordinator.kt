@@ -185,6 +185,7 @@ class IndexCoordinator(
                     reclaimableBytes = exact.reclaimableBytes + near.reclaimableBytes,
                     message = buildString {
                         append("完成：精确重复 ${exact.groups} 组 · 相似 ${near.groups} 组")
+                        if (near.diffGroups > 0) append(" · 差分 ${near.diffGroups} 组")
                         if (skipped > 0) append(" · 跳过 ${skipped} 张（无法解码）")
                     },
                     skippedCount = skipped,

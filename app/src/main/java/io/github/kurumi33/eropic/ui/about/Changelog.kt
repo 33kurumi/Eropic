@@ -18,6 +18,22 @@ data class ChangelogEntry(
  */
 val changelog: List<ChangelogEntry> = listOf(
     ChangelogEntry(
+        version = "0.9",
+        summary = "清理页新增「差分」分类：文件名主体相同、只有 p0/p1 结尾不同的图单独成组，不再混进相似；" +
+            "对比预览支持组内多张左右滑动，并显示每张的分辨率/体积/格式/bpp 等参数与「建议保留」；" +
+            "清理可以「全部取消」勾选；新增「保留本组」，以后不再出现这一组，并可一键清除所有保留标记重扫；" +
+            "回收站显示真正在用的目录，目录不可写时自动回退，不再出现「无法创建回收站目录」。",
+        date = "2026-10-31",
+    ),
+    ChangelogEntry(
+        version = "0.8",
+        summary = "文件夹路径大小写按真实存储校正（不再出现 Pictures 和 pictures 两个）；" +
+            "文件夹页底部新增「视频」「GIF」虚拟入口（只统计，不动文件）；" +
+            "图库「全部展开 / 收起」对全部日期生效；查看器新增「用其他应用打开」；" +
+            "文件夹支持长按多选、批量置顶与移入回收站；文件夹页顶部显示真实张数与总大小。",
+        date = "2026-10-31",
+    ),
+    ChangelogEntry(
         version = "0.7",
         summary = "联网识图扩到 7 家（Google Lens / 百度 / SauceNAO / ascii2d / IQDB / onegai.moe / lenso.ai）；" +
             "SauceNAO、ascii2d、IQDB 的结果改为应用内列表展示；本地识图新增颜色画像与同角色候选；" +

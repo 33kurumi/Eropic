@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
+import io.github.kurumi33.eropic.core.fileops.OpFailure
 import io.github.kurumi33.eropic.ui.AppScreen
 import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.formatBytes
@@ -78,7 +79,9 @@ private const val TRASH_DIR_NAME = ".EropicTrash"
  * 回收站页面（v0.2：从底栏 Tab 移到「清理」页里的二级页面）。
  *
  * "删除"其实是把文件同卷 rename 到 <卷根>/.EropicTrash/（瞬时、零拷贝），保留期跟随设置
- * 「清理与回收站 → 回收站保留时长」。本页负责查看、恢复、永久删除、清空，以及配置回收站目录；
+ * 「清理与回收站 → 回收站保留时长」。目录优先用设置里的配置，配置目录写不进去时
+ * 会自动回退到卷根或应用私有目录（卡片里写明实际在用的目录，避免用户以为丢图）。
+ * 本页负责查看、恢复、永久删除、清空，以及配置回收站目录；
  * 所有改动文件的操作都依赖"所有文件访问"权限（[hasWriteAccess]），未授权时按钮全部禁用，
  * 只让用户查看内容与到期时间，不会出现点了没反应的操作。
  *
@@ -104,14 +107,29 @@ fun TrashScreen(
     var confirmAction by remember { mutableStateOf<TrashConfirmAction?>(null) }
     var showLocationDialog by remember { mutableStateOf(false) }
 
-    // ---- 回收站位置：设置变了就重新读一次真实目录与已有条目所在目录 ----
+    // ---- 回收站位置：设置变了就重新读一次真实目录（含回退链）与已有条目所在目录 ----
     var configuredDir by remember { mutableStateOf<String?>(null) }
+    var effectiveDir by remember { mutableStateOf<String?>(null) }
+    var dirCandidates by remember { mutableStateOf<List<String>>(emptyList()) }
     var existingLocations by remember { mutableStateOf<List<String>>(emptyList()) }
+    var locationError by remember { mutableStateOf<String?>(null) }
     var locationLoading by remember { mutableStateOf(true) }
     LaunchedEffect(settings.trashRelativeDir) {
         locationLoading = true
+        locationError = null
+        // 配置值只是"用户希望放哪"，真正会写进去的是回退链里第一个可写的目录，
+        // 所以两个都读：前者用来判断要不要提示「已回退」，后者是给用户看的事实。
         configuredDir = runCatching { viewModel.configuredTrashDir() }
-            .getOrElse { "读取失败：" + (it.message ?: it::class.simpleName) }
+            .getOrElse {
+                locationError = "读取配置目录失败：" + (it.message ?: it::class.simpleName)
+                null
+            }
+        effectiveDir = runCatching { viewModel.effectiveTrashDir() }
+            .getOrElse {
+                locationError = "读取实际目录失败：" + (it.message ?: it::class.simpleName)
+                null
+            }
+        dirCandidates = runCatching { viewModel.trashDirCandidates() }.getOrDefault(emptyList())
         existingLocations = runCatching { viewModel.trashLocations() }.getOrDefault(emptyList())
         locationLoading = false
     }
@@ -123,16 +141,28 @@ fun TrashScreen(
         if (!alive.containsAll(selectedIds)) selectedIds = selectedIds intersect alive
     }
 
-    /** 统一执行入口：防重复点击、把结果转成 Snackbar 文案、异常不崩界面。 */
-    fun runTrashAction(label: String, action: suspend () -> String) {
+    /**
+     * 统一执行入口：防重复点击、把结果转成 Snackbar 文案、异常不崩界面。
+     *
+     * 失败原因里如果出现「无法创建回收站目录 / 不可写」，说明是目录写不进去，
+     * 只回一句"失败"用户没法自救，所以在提示末尾直接给出下一步（换个目录或补权限）。
+     */
+    fun runTrashAction(label: String, action: suspend () -> TrashActionOutcome) {
         if (busy) return
         busy = true
         scope.launch {
             try {
-                onMessage(action())
+                val outcome = action()
+                var text = outcome.message
+                if (outcome.failures.any { looksLikeTrashDirProblem(it.reason) }) {
+                    text += "；" + TrashDirHint
+                }
+                onMessage(text)
                 selectedIds = emptySet()
             } catch (t: Throwable) {
-                onMessage(label + "失败：" + (t.message ?: t::class.simpleName))
+                val reason = t.message ?: t::class.simpleName ?: "未知错误"
+                val suffix = if (looksLikeTrashDirProblem(reason)) "；" + TrashDirHint else ""
+                onMessage(label + "失败：" + reason + suffix)
             } finally {
                 busy = false
             }
@@ -201,7 +231,10 @@ fun TrashScreen(
                 OutlinedButton(
                     onClick = {
                         val ids = trashItems.map { it.id }
-                        runTrashAction("全部恢复") { viewModel.restoreFromTrash(ids).message }
+                        runTrashAction("全部恢复") {
+                            val result = viewModel.restoreFromTrash(ids)
+                            TrashActionOutcome(result.message, result.failures)
+                        }
                     },
                     enabled = hasWriteAccess && !busy && !trashEmpty,
                 ) { Text("全部恢复") }
@@ -209,7 +242,10 @@ fun TrashScreen(
                 OutlinedButton(
                     onClick = {
                         val ids = selectedIds.toList()
-                        runTrashAction("恢复所选") { viewModel.restoreFromTrash(ids).message }
+                        runTrashAction("恢复所选") {
+                            val result = viewModel.restoreFromTrash(ids)
+                            TrashActionOutcome(result.message, result.failures)
+                        }
                     },
                     enabled = hasWriteAccess && !busy && !selectionEmpty,
                 ) { Text("恢复所选") }
@@ -255,8 +291,11 @@ fun TrashScreen(
                 item(key = "trash-location") {
                     TrashLocationCard(
                         configuredDir = configuredDir,
+                        effectiveDir = effectiveDir,
+                        candidates = dirCandidates,
                         existingLocations = existingLocations,
                         loading = locationLoading,
+                        error = locationError,
                         onChangeLocation = { showLocationDialog = true },
                     )
                 }
@@ -298,7 +337,10 @@ fun TrashScreen(
                 destructive = true,
                 onConfirm = {
                     val ids = selectedIds.toList()
-                    runTrashAction("永久删除") { viewModel.deleteFromTrashPermanently(ids).message }
+                    runTrashAction("永久删除") {
+                        val result = viewModel.deleteFromTrashPermanently(ids)
+                        TrashActionOutcome(result.message, result.failures)
+                    }
                 },
                 onDismiss = { confirmAction = null },
             )
@@ -310,7 +352,10 @@ fun TrashScreen(
                 confirmText = "清空回收站",
                 destructive = true,
                 onConfirm = {
-                    runTrashAction("清空回收站") { viewModel.emptyTrashNow().message }
+                    runTrashAction("清空回收站") {
+                        val result = viewModel.emptyTrashNow()
+                        TrashActionOutcome(result.message, result.failures)
+                    }
                 },
                 onDismiss = { confirmAction = null },
             )
@@ -345,20 +390,61 @@ fun TrashScreen(
 @Composable
 private fun TrashLocationCard(
     configuredDir: String?,
+    effectiveDir: String?,
+    candidates: List<String>,
     existingLocations: List<String>,
     loading: Boolean,
+    error: String?,
     onChangeLocation: () -> Unit,
 ) {
+    val configured = configuredDir
+    val effective = effectiveDir
+    // 配置值和实际值不一致 = 回退发生了（卷根不可写时会退到私有目录），必须明说，
+    // 否则用户看到目录变了会以为文件被搬走了。
+    val fellBack = !loading && configured != null && effective != null &&
+        normalizeDirPath(configured) != normalizeDirPath(effective)
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(text = "回收站位置", style = MaterialTheme.typography.titleMedium)
+            // 用户真正关心「文件现在挪到哪了」，所以正文给实际在用的目录，配置值只在回退时出现。
             Text(
-                text = "当前目录：" + if (loading) "读取中…" else (configuredDir ?: "未知"),
+                text = "正在使用：" + when {
+                    loading -> "读取中…"
+                    effective != null -> effective
+                    else -> "未知"
+                },
                 style = MaterialTheme.typography.bodyMedium,
             )
+            if (!loading && candidates.isNotEmpty()) {
+                Text(
+                    text = "按优先级尝试：" + candidates.joinToString(" → "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (fellBack && configured != null && effective != null) {
+                Text(
+                    text = "配置的位置不可写，已自动回退到这里，照片仍然只是改名移动、可正常恢复。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    text = "配置的位置：" + configured,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!loading && error != null) {
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             if (existingLocations.isNotEmpty()) {
                 Text(
                     text = "已有条目所在目录",
@@ -465,6 +551,11 @@ private fun TrashLocationDialog(
                     )
                 }
 
+                Text(
+                    text = "目录不可写时会自动回退到应用私有目录，不会导致图片丢失。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Text(
                     text = "换位置后，已有条目留在原目录仍可恢复；新移入的才放到新位置。",
                     style = MaterialTheme.typography.labelSmall,
@@ -638,3 +729,24 @@ private fun expiryText(expiresAtMs: Long, nowMs: Long): String {
 }
 
 private const val DAY_MS = 24L * 60L * 60L * 1000L
+
+/** 目录写不进去时给用户的下一步；Snackbar 与卡片提示共用同一句，避免口径不一致。 */
+private const val TrashDirHint = "可到「回收站位置」里换个目录，或到设置里确认「所有文件访问」权限"
+
+/**
+ * 失败原因看起来是「回收站目录写不进去」吗？
+ *
+ * 这两个词分别来自 TrashRepository 的移入失败（无法创建回收站目录）与恢复失败
+ * （恢复失败（目标目录可能不可写））；命中才追加换目录引导，其它失败不打扰用户。
+ */
+private fun looksLikeTrashDirProblem(reason: String): Boolean =
+    reason.contains("无法创建回收站目录") || reason.contains("不可写")
+
+/** 动作结果 + 逐条失败原因：失败原因决定 Snackbar 要不要追加换目录引导。 */
+private data class TrashActionOutcome(
+    val message: String,
+    val failures: List<OpFailure> = emptyList(),
+)
+
+/** 比较两个目录时忽略末尾的 /，避免同一个路径因为写法不同被误判成「回退」。 */
+private fun normalizeDirPath(path: String): String = path.trimEnd('/')

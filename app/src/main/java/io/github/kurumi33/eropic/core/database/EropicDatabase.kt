@@ -9,6 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import io.github.kurumi33.eropic.core.analysis.detectors.DetectionDao
 import io.github.kurumi33.eropic.core.database.dao.DuplicateDao
 import io.github.kurumi33.eropic.core.database.dao.HashBandDao
+import io.github.kurumi33.eropic.core.database.dao.IgnoredDao
 import io.github.kurumi33.eropic.core.database.dao.MediaDao
 import io.github.kurumi33.eropic.core.database.dao.OperationLogDao
 import io.github.kurumi33.eropic.core.database.dao.PendingSignatureDao
@@ -18,6 +19,7 @@ import io.github.kurumi33.eropic.core.database.dao.VideoDao
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
 import io.github.kurumi33.eropic.core.database.entity.DuplicateMemberEntity
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
+import io.github.kurumi33.eropic.core.database.entity.IgnoredMemberEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.database.entity.OperationLogEntity
 import io.github.kurumi33.eropic.core.database.entity.PendingSignatureEntity
@@ -36,8 +38,9 @@ import io.github.kurumi33.eropic.core.database.entity.VideoEntity
         SavedFilterEntity::class,
         PendingSignatureEntity::class,
         VideoEntity::class,
+        IgnoredMemberEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class EropicDatabase : RoomDatabase() {
@@ -55,6 +58,9 @@ abstract class EropicDatabase : RoomDatabase() {
 
     /** v0.8：视频索引（只识别统计，不改动文件位置）。 */
     abstract fun videoDao(): VideoDao
+
+    /** v0.9：「保留本组」标记（重新扫描时跳过这些成员）。 */
+    abstract fun ignoredDao(): IgnoredDao
 
     companion object {
         /**
@@ -186,10 +192,33 @@ abstract class EropicDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v6 -> v7：v0.9 新增「保留本组」标记表（ignored_member）。
+         *
+         * 纯新增空表，不碰 media_item，升级后不需要重扫图片。
+         */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `ignored_member` (" +
+                        "`mediaId` INTEGER NOT NULL, " +
+                        "`ignoredAtMs` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`mediaId`))",
+                )
+            }
+        }
+
         fun build(context: Context): EropicDatabase =
             Room.databaseBuilder(context, EropicDatabase::class.java, "eropic.db")
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                )
                 // 兜底：未来新增版本忘了写迁移时，宁可清库重建也不要让 App 启动即崩。
                 .fallbackToDestructiveMigration()
                 .build()

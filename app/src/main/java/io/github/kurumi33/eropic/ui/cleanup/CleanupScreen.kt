@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -69,10 +70,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** 清理页的八个入口。前两个来自查重分组，其余来自检测器。 */
+/** 清理页的九个入口。前三个来自查重分组，其余来自检测器。 */
 enum class CleanupCategory(val label: String) {
     DUPLICATES("重复"),
     SIMILAR("相似"),
+    // 差分：文件名主体相同、只差 p0/p1 这类结尾，查重时已从相似判定里排除，这里单独列出来。
+    DIFF("差分"),
     LARGE("大文件"),
     OLD("久远"),
     SCREENSHOT("截图"),
@@ -97,6 +100,8 @@ fun CleanupScreen(
     val scope = rememberCoroutineScope()
     val indexState by viewModel.indexState.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
+    // 全局「保留标记」数量：清理过程中标记「保留本组」的图片数，顶栏入口上直接显示。
+    val ignoredCount by viewModel.ignoredCount.collectAsStateWithLifecycle()
 
     var category by rememberSaveable { mutableStateOf(CleanupCategory.DUPLICATES) }
     var filterState by remember { mutableStateOf(FilterUiState()) }
@@ -105,6 +110,8 @@ fun CleanupScreen(
     var filteredState by remember { mutableStateOf<FilterUiState?>(null) }
     var compareGroupId by rememberSaveable { mutableStateOf(-1L) }
     var refreshToken by remember { mutableIntStateOf(0) }
+    // 顶栏「保留标记」入口：点开先确认，确认后清除全部标记并重新扫描重复/相似分组。
+    var showClearIgnoredDialog by rememberSaveable { mutableStateOf(false) }
 
     filteredState?.let { applied ->
         FilteredScreen(
@@ -124,6 +131,16 @@ fun CleanupScreen(
             groupId = compareGroupId,
             onClose = { compareGroupId = -1L },
             onOpenViewer = onOpenViewer,
+            // 对比页里也能「保留本组」：标记后这张对比页就没有意义了，直接关掉并刷新列表。
+            onIgnoreGroup = {
+                scope.launch {
+                    viewModel.ignoreGroup(compareGroupId)
+                    // 关掉对比页后回到列表；refreshToken 让分组列表重新拉一遍。
+                    // 这里不能动 selectionOverrides：它在下面的 produceState 之后才声明。
+                    compareGroupId = -1L
+                    refreshToken++
+                }
+            },
         )
         return
     }
@@ -138,7 +155,6 @@ fun CleanupScreen(
             },
         )
     }
-
     val content by produceState<CleanupContent>(
         initialValue = CleanupContent.Loading,
         category,
@@ -154,6 +170,10 @@ fun CleanupScreen(
 
                 CleanupCategory.SIMILAR -> CleanupContent.Grouped(
                     groups.filter { it.kind == DuplicateScanner.KIND_NEAR },
+                )
+
+                CleanupCategory.DIFF -> CleanupContent.Grouped(
+                    groups.filter { it.kind == DuplicateScanner.KIND_DIFF },
                 )
 
                 CleanupCategory.LARGE -> {
@@ -277,6 +297,37 @@ fun CleanupScreen(
         value = runCatching { loadCleanupOverview(viewModel, groups) }.getOrNull()
     }
 
+    if (showClearIgnoredDialog) {
+        // 清标记 = 让这些图片重新参与查重，所以确认后会触发一次重新扫描；不会动任何文件。
+        AlertDialog(
+            onDismissRequest = { showClearIgnoredDialog = false },
+            title = { Text("清除全部保留标记？") },
+            text = {
+                Text(
+                    if (ignoredCount > 0) {
+                        "会把 $ignoredCount 个「保留本组」标记清掉，并重新扫描重复/相似分组。不会删除或移动任何文件。"
+                    } else {
+                        "当前没有保留标记"
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearIgnoredDialog = false
+                        viewModel.clearIgnoredGroups()
+                        // 标记清掉后建议集合会变，旧的勾选覆盖记录已经没意义，一并清空。
+                        selectionOverrides.clear()
+                        refreshToken++
+                    },
+                ) { Text("清除并重扫") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearIgnoredDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         EropicTopBar(
             title = "清理",
@@ -286,6 +337,10 @@ fun CleanupScreen(
             actions = {
                 IconButton(onClick = { viewModel.openScreen(AppScreen.Trash) }) {
                     Icon(imageVector = Icons.Filled.Delete, contentDescription = "回收站")
+                }
+                TextButton(onClick = { showClearIgnoredDialog = true }) {
+                    // 数字直接放按钮上：用户一眼能看出「我刚保留了几组」。
+                    Text("保留标记 $ignoredCount")
                 }
                 TextButton(onClick = { viewModel.openScreen(AppScreen.CleanupReport) }) {
                     Text("清理报告")
@@ -335,6 +390,10 @@ fun CleanupScreen(
                                     if (current.groups.isEmpty()) "还没有精确重复分组。" else
                                         "精确重复：文件内容（SHA-256）完全一致的图片，默认按可释放空间排序。"
 
+                                CleanupCategory.DIFF ->
+                                    if (current.groups.isEmpty()) "还没有差分图分组。" else
+                                        "差分图：文件名主体相同、只有 p0/p1 这类结尾不同，已从相似判定里排除；保留哪张由你决定。"
+
                                 else ->
                                     if (current.groups.isEmpty()) "还没有相似图片分组。" else
                                         "相似图片：dHash 与 pHash 双重距离阈值内的图片，不一定真的相同，需逐组确认。"
@@ -352,6 +411,8 @@ fun CleanupScreen(
                                 selectedBytes = selectedBytes,
                                 hasWriteAccess = hasWriteAccess,
                                 onSelectAllSuggested = { selectionOverrides.clear() },
+                                // 全部取消：把当前已知成员逐个覆盖成「不勾选」，默认建议不会再把它们选回来。
+                                onClearAll = { knownIds.forEach { selectionOverrides[it] = false } },
                                 onApply = { applyTrash(selectedIds.toList()) },
                                 onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
                             )
@@ -373,6 +434,15 @@ fun CleanupScreen(
                                 onOpenViewer = onOpenViewer,
                                 onCompare = { compareGroupId = group.groupId },
                                 onOpenPermission = { viewModel.openScreen(AppScreen.Permission) },
+                                onIgnoreGroup = {
+                                    // 保留本组：把该组全部成员标记为「以后不考虑」，视图里随即移除该组。
+                                    scope.launch {
+                                        viewModel.ignoreGroup(group.groupId)
+                                        // 组没了，它上面的勾选覆盖记录也一起清掉，避免影响下一轮建议。
+                                        selectionOverrides.clear()
+                                        refreshToken++
+                                    }
+                                },
                             )
                         }
                     }
@@ -413,6 +483,7 @@ private fun SelectionSummaryBar(
     selectedBytes: Long,
     hasWriteAccess: Boolean,
     onSelectAllSuggested: () -> Unit,
+    onClearAll: () -> Unit,
     onApply: () -> Unit,
     onOpenPermission: () -> Unit,
 ) {
@@ -443,6 +514,7 @@ private fun SelectionSummaryBar(
                     )
                 }
             }
+            // 两个「全选/全不选」并排，删除按钮单独一行：三个挤一行在窄屏会把文案截断。
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -451,12 +523,21 @@ private fun SelectionSummaryBar(
                     onClick = onSelectAllSuggested,
                     modifier = Modifier.weight(1f),
                 ) { Text("全部按建议勾选", maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                Button(
-                    onClick = onApply,
-                    enabled = hasWriteAccess && selectedCount > 0,
+                OutlinedButton(
+                    onClick = onClearAll,
                     modifier = Modifier.weight(1f),
-                ) { Text("移入回收站", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                ) { Text("全部取消", maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
+            Text(
+                text = "「全部取消」只取消勾选，不会删除或移动任何图片。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onApply,
+                enabled = hasWriteAccess && selectedCount > 0,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("移入回收站") }
             if (!hasWriteAccess) {
                 // 置灰按钮旁边给一条能点的说明，点了进应用内的权限页（那里再跳系统设置）。
                 WriteAccessHintInline(onOpenPermission = onOpenPermission)
@@ -549,6 +630,7 @@ private fun GroupItem(
     onOpenViewer: (ids: List<Long>, startIndex: Int) -> Unit,
     onCompare: () -> Unit,
     onOpenPermission: () -> Unit,
+    onIgnoreGroup: () -> Unit,
 ) {
     val memberIds = remember(members) { members.map { it.id } }
     val groupSelected = remember(selectedIds, memberIds) {
@@ -564,12 +646,14 @@ private fun GroupItem(
         onSelectSuggested = { onSelectSuggested(assessment.trashIds) },
         onApply = { onApply(groupSelected) },
         onOpenViewer = { media ->
-            val index = memberIds.indexOf(media.id).coerceAtLeast(0)
-            onOpenViewer(memberIds, index)
+            // 找不到索引时不要退回 0：那会在查看器里打开组内第一张无关的图，宁可什么都不做。
+            val index = memberIds.indexOf(media.id)
+            if (index >= 0) onOpenViewer(memberIds, index)
         },
         onCompare = onCompare,
         hasWriteAccess = hasWriteAccess,
         onOpenPermission = onOpenPermission,
+        onIgnoreGroup = onIgnoreGroup,
     )
 }
 
@@ -640,8 +724,8 @@ private suspend fun loadCleanupOverview(
     var categoryCount = 0
     var bytes = 0L
 
-    // 重复 / 相似：分组表里已经算好了每组可释放字节。
-    for (kind in listOf(DuplicateScanner.KIND_EXACT, DuplicateScanner.KIND_NEAR)) {
+    // 重复 / 相似 / 差分：分组表里已经算好了每组可释放字节。
+    for (kind in listOf(DuplicateScanner.KIND_EXACT, DuplicateScanner.KIND_NEAR, DuplicateScanner.KIND_DIFF)) {
         val matched = groups.filter { it.kind == kind }
         if (matched.isNotEmpty()) {
             categoryCount++

@@ -43,6 +43,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import io.github.kurumi33.eropic.core.analysis.DuplicateScanner
 import io.github.kurumi33.eropic.core.cleanup.GroupQualityAssessment
 import io.github.kurumi33.eropic.core.cleanup.QualityScore
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
@@ -71,6 +72,10 @@ private sealed interface ThumbState {
  * 纯展示：卡片自己不算任何分数，评分与依据全部来自 [assessment]，保证和清理页口径一致。
  * 勾选状态由调用方（CleanupScreen）统一持有，卡片只负责渲染「这张是否加入待删」并回调切换；
  * 真正删除由 [onApply] 的调用方执行（只会移入回收站，30 天内可恢复）。
+ *
+ * v0.9：
+ * - 卡头类型标签按 [DuplicateGroupEntity.kind] 显示「重复 / 相似 / 差分」，差分组额外给一行解释；
+ * - 新增「保留本组」入口（[onIgnoreGroup]）：只是记住这一组以后不再显示，不删除、不移动任何文件。
  */
 @Composable
 fun QualityGroupCard(
@@ -86,6 +91,10 @@ fun QualityGroupCard(
     onCompare: () -> Unit,
     hasWriteAccess: Boolean,
     onOpenPermission: () -> Unit,
+    // v0.9：保留本组（只写忽略标记，不删文件）；为 null 时按钮禁用，旧调用方不传也能编译。
+    onIgnoreGroup: (() -> Unit)? = null,
+    // v0.9：一次看完整组；暂未接入也不影响卡片其余功能。
+    onCompareAll: (() -> Unit)? = null,
 ) {
     // 评分与成员按 id 对齐，再按总分降序：A/B 两栏取前两名，第三张起排成小方块。
     val ranked = remember(members, assessment) {
@@ -95,7 +104,7 @@ fun QualityGroupCard(
             }
             .sortedByDescending { it.score.total }
     }
-    val kindLabel = if (group.kind.equals("EXACT", ignoreCase = true)) "精确重复" else "相似图片"
+    val isDiffGroup = group.kind.equals(KIND_DIFF, ignoreCase = true)
     // 勾选集合是全局的（跨分组），这里只统计落在本组成员上的部分。
     val memberIds = remember(members) { members.map { it.id }.toSet() }
     val selectedInGroup = remember(selectedTrashIds, memberIds) {
@@ -108,10 +117,12 @@ fun QualityGroupCard(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // 卡头：类型 · 张数 · 可释放空间；右侧是用户当前勾选数，方便和底部按钮对账。
+            // 卡头：类型标签（重复 / 相似 / 差分）· 张数 · 可释放空间；右侧是用户当前勾选数，方便和底部按钮对账。
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                GroupKindChip(kind = group.kind)
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "$kindLabel · ${group.memberCount} 张 · 可释放 ${formatBytes(group.reclaimableBytes)}",
+                    text = "${group.memberCount} 张 · 可释放 ${formatBytes(group.reclaimableBytes)}",
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -125,6 +136,14 @@ fun QualityGroupCard(
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
+                )
+            }
+            if (isDiffGroup) {
+                // 差分图是「同一主体的不同版本」，每组通常想全部保留，所以单独说明一句。
+                Text(
+                    text = "差分图：同一主体的不同版本（p0/p1 之类），已从相似判定里排除，保留哪张由你决定。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -222,15 +241,27 @@ fun QualityGroupCard(
 
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onCompare) { Text("对比预览") }
+                if (onCompareAll != null) {
+                    TextButton(onClick = onCompareAll) { Text("全部对比") }
+                }
                 Spacer(modifier = Modifier.weight(1f))
+                // v0.9：「保留本组」= 以后不再显示这一组，只写标记，不删除也不移动文件。
+                TextButton(onClick = { onIgnoreGroup?.invoke() }, enabled = onIgnoreGroup != null) {
+                    Text("保留本组")
+                }
+            }
+            if (onIgnoreGroup != null) {
                 Text(
-                    text = "点缩略图右上角勾选框可切换是否移入回收站",
+                    text = "保留后这一组不再出现在清理列表，图片本身不动；可到清理页顶部「保留标记」里一键清除。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    textAlign = TextAlign.End,
                 )
             }
+            Text(
+                text = "点缩略图右上角勾选框可切换是否移入回收站",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             // 底部两个并排按钮：先把建议全部勾上，再一键应用当前勾选。
             Row(
@@ -525,6 +556,46 @@ private fun FactorRow(label: String, value: String) {
             modifier = Modifier.weight(1f),
         )
     }
+}
+
+/** v0.9：分组类型标签，重复/相似用 secondaryContainer，差分组用 tertiaryContainer 区分。 */
+@Composable
+private fun GroupKindChip(kind: String) {
+    val isDiff = kind.equals(KIND_DIFF, ignoreCase = true)
+    Surface(
+        color = if (isDiff) {
+            MaterialTheme.colorScheme.tertiaryContainer
+        } else {
+            MaterialTheme.colorScheme.secondaryContainer
+        },
+        contentColor = if (isDiff) {
+            MaterialTheme.colorScheme.onTertiaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSecondaryContainer
+        },
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Text(
+            text = groupKindLabel(kind),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+    }
+}
+
+/**
+ * 差分组常量。DuplicateScanner 目前只有 KIND_EXACT / KIND_NEAR，
+ * 差分组（KIND_DIFF）还在接入中，这里先用字符串兜住；常量落盘后替换成 DuplicateScanner.KIND_DIFF 即可。
+ */
+private const val KIND_DIFF = "DIFF"
+
+/** 分组类型的中文标签；未知类型按「重复」处理，避免卡片头出现空白。 */
+private fun groupKindLabel(kind: String): String = when (kind.uppercase(Locale.US)) {
+    DuplicateScanner.KIND_EXACT -> "重复"
+    DuplicateScanner.KIND_NEAR -> "相似"
+    KIND_DIFF -> "差分"
+    else -> "重复"
 }
 
 /** 优先用缩略图文件，取不到（或失败）时回退到原图 content Uri；加载中显示占位。 */

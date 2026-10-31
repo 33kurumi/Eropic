@@ -8,7 +8,7 @@ import java.util.Locale
 
 val buildTimeMs = System.currentTimeMillis()
 val buildStamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date(buildTimeMs))
-val appVersionName = "0.8.0"
+val appVersionName = "0.9.0"
 
 // v0.7：release 签名。
 // 侧载分发需要一个长期稳定的签名（换签名必须卸载重装，用户数据会丢），所以优先用项目根目录的

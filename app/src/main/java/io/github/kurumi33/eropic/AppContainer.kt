@@ -46,6 +46,8 @@ class AppContainer(context: Context) {
         contentResolver = appContext.contentResolver,
         mediaDao = database.mediaDao(),
         duplicateDao = database.duplicateDao(),
+        // v0.9：「保留本组」的成员在重新扫描时不再进分组。
+        ignoredDao = database.ignoredDao(),
     )
     val indexCoordinator: IndexCoordinator = IndexCoordinator(
         context = appContext,

@@ -18,6 +18,7 @@ import io.github.kurumi33.eropic.BuildConfig
 import io.github.kurumi33.eropic.core.analysis.detectors.BurstResult
 import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileResult
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
+import io.github.kurumi33.eropic.core.database.entity.IgnoredMemberEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
 import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
@@ -279,6 +280,72 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     suspend fun members(groupId: Long): List<MediaEntity> = duplicateDao.members(groupId)
+
+    // ---- v0.9：「保留本组」标记（以后不再考虑这一组）与差分图 ----
+
+    /** 「保留本组」标记数量，清理页顶栏展示；0 时清理页会写「保留标记 0」。 */
+    val ignoredCount: StateFlow<Int> = container.database.ignoredDao().countFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /**
+     * 把一组的全部成员标成「保留本组」：以后重新扫描不再把它们算进分组。
+     *
+     * 只写标记表 + 立刻修正现有分组，不动任何图片文件。按成员而不是按组记录，
+     * 是因为组的成员会随文件增删变化，按成员才稳定（某组过滤后不足 2 张就不显示了）。
+     */
+    suspend fun ignoreGroup(groupId: Long): Int {
+        val members = runCatching { duplicateDao.members(groupId) }.getOrDefault(emptyList())
+        if (members.isEmpty()) {
+            postMessage("这组已经不存在了，刷新一下看看")
+            return 0
+        }
+        val ids = members.map { it.id }
+        val now = System.currentTimeMillis()
+        val ok = runCatching {
+            container.database.ignoredDao().insertAll(
+                ids.map { IgnoredMemberEntity(mediaId = it, ignoredAtMs = now) },
+            )
+            // 立刻把该组从列表里去掉：删成员行 → 重算 → 清掉不足 2 张的组（与回收站同一套收尾）。
+            duplicateDao.deleteMembersForMedia(ids)
+            duplicateDao.recomputeGroups()
+            duplicateDao.deleteMembersOfIncompleteGroups()
+            duplicateDao.deleteIncompleteGroups()
+        }.isSuccess
+        if (!ok) {
+            postMessage("保留失败，请重试")
+            return 0
+        }
+        postMessage("已保留 ${ids.size} 张：重新扫描时不再显示这组（清理页顶栏「保留标记」可清除）")
+        return ids.size
+    }
+
+    /**
+     * 清除所有「保留本组」标记并重新扫描重复/相似分组。
+     *
+     * 只重跑分组（读已有指纹），不会重新解码图片，通常几秒内完成。
+     */
+    fun clearIgnoredGroups() {
+        viewModelScope.launch {
+            val cleared = runCatching {
+                val dao = container.database.ignoredDao()
+                val n = dao.count()
+                dao.clear()
+                n
+            }.getOrDefault(0)
+            val level = settings.value.similarity
+            val ok = runCatching {
+                container.duplicateScanner.scanExact()
+                container.duplicateScanner.scanNear(level.dhashThreshold, level.phashThreshold)
+            }.isSuccess
+            postMessage(
+                if (ok) {
+                    "已清除 $cleared 个保留标记，并重新扫描了重复/相似分组"
+                } else {
+                    "已清除 $cleared 个保留标记，但重新扫描失败，请点「重新扫描」"
+                },
+            )
+        }
+    }
 
     fun startIndex() = container.indexCoordinator.start(
         similarity = settings.value.similarity,
@@ -610,6 +677,12 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
 
     /** 当前设置对应的回收站绝对路径。 */
     suspend fun configuredTrashDir(): String = trashRepository.configuredTrashDir()
+
+    /** v0.9：真正在用的回收站目录（做了可写探测，可能已回退到应用私有目录）。 */
+    suspend fun effectiveTrashDir(): String = trashRepository.effectiveTrashDir()
+
+    /** v0.9：按优先级尝试过的回收站候选目录（回收站页解释「为什么在这里」）。 */
+    suspend fun trashDirCandidates(): List<String> = trashRepository.trashDirCandidates()
 
     /** 当前设置目录 + 已有条目所在的旧目录（改过位置后老条目仍留在原处）。 */
     suspend fun trashLocations(): List<String> = trashRepository.trashLocations()
