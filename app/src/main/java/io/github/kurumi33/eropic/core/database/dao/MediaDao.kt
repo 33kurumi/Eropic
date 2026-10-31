@@ -96,7 +96,17 @@ interface MediaDao {
     @Query("SELECT * FROM media_item WHERE isPresent = 1 ORDER BY dateTakenMs DESC LIMIT :limit")
     fun recentFlow(limit: Int): Flow<List<MediaEntity>>
 
-    @Query("SELECT * FROM media_item WHERE isPresent = 1 AND signatureVersion = 0 ORDER BY dateTakenMs DESC LIMIT :limit")
+    /**
+     * 待计算指纹的条目。
+     *
+     * 排除已经在 pending_signature 里的行：v0.7 起指纹先落到待落盘表（避免高频写 media_item
+     * 触发图库分页整体刷新），所以"还没算"= media_item 里是 0 分 且 待落盘表里没有它。
+     */
+    @Query(
+        "SELECT * FROM media_item m WHERE m.isPresent = 1 AND m.signatureVersion = 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM pending_signature p WHERE p.mediaId = m.id) " +
+            "ORDER BY m.dateTakenMs DESC LIMIT :limit"
+    )
     suspend fun itemsNeedingSignature(limit: Int): List<MediaEntity>
 
     /** 按 id 键集分页：后台补缩略图等"遍历全库"的任务用它，避免 OFFSET 越翻越慢。 */
@@ -128,7 +138,10 @@ interface MediaDao {
     @Query("UPDATE media_item SET signatureVersion = -1 WHERE id IN (:ids)")
     suspend fun markSignatureUnsupported(ids: List<Long>)
 
-    @Query("SELECT COUNT(*) FROM media_item WHERE isPresent = 1 AND signatureVersion = 0")
+    @Query(
+        "SELECT COUNT(*) FROM media_item m WHERE m.isPresent = 1 AND m.signatureVersion = 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM pending_signature p WHERE p.mediaId = m.id)"
+    )
     suspend fun countNeedingSignature(): Int
 
     @Query("SELECT COUNT(*) FROM media_item")

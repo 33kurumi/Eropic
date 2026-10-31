@@ -14,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -36,6 +37,13 @@ data class IndexState(
     val finishedAtMs: Long = 0L,
     /** 无法解码而跳过的张数（解码失败的图不会反复重算） */
     val skippedCount: Int = 0,
+    /**
+     * 是否处于"暂停"状态（v0.7）。
+     *
+     * 暂停不等于取消：已经算完的指纹在暂停时会被合并回主表，进度保留；
+     * [isRunning] 仍然为 true，避免图库把它当成"没在跑"再允许开一次。
+     */
+    val paused: Boolean = false,
 ) {
     val isRunning: Boolean
         get() = phase == IndexPhase.SYNCING || phase == IndexPhase.HASHING || phase == IndexPhase.DEDUPING
@@ -64,6 +72,14 @@ class IndexCoordinator(
     private var job: Job? = null
 
     /**
+     * 暂停标记。
+     *
+     * 用 @Volatile 而不是 StateFlow：只有计算循环会读它，暂停/继续按钮的反馈靠 _state。
+     */
+    @Volatile
+    private var paused = false
+
+    /**
      * 开始（或续算）一次索引。
      *
      * [similarity] 决定近重复的判定档位（设置里可调），[scope] 决定扫描哪些目录。
@@ -74,9 +90,13 @@ class IndexCoordinator(
         scope: ScanScope = ScanScope.Default,
     ) {
         if (_state.value.isRunning) return
+        paused = false
         job = workerScope.launch {
             val started = System.currentTimeMillis()
             try {
+                // 上次可能被暂停/杀进程时留下一批"已算完但没合并"的指纹，先合并再统计待算数量，
+                // 否则它们会被当成没算过而重复解码。
+                runCatching { repository.flushPendingSignatures() }
                 _state.value = _state.value.copy(
                     phase = IndexPhase.SYNCING,
                     scanned = 0,
@@ -84,6 +104,7 @@ class IndexCoordinator(
                     startedAtMs = started,
                     finishedAtMs = 0L,
                     skippedCount = 0,
+                    paused = false,
                     message = "正在读取系统相册索引（${scope.describe()}）…",
                 )
                 val sync = repository.syncFromMediaStore(scope) { scanned, changed ->
@@ -101,6 +122,10 @@ class IndexCoordinator(
                 var done = 0
                 var skipped = 0
                 while (true) {
+                    // 暂停：原地挂起（不退出任务），已算的结果仍在待落盘表里。
+                    while (paused) {
+                        delay(PAUSE_POLL_MS)
+                    }
                     val batch = repository.itemsNeedingSignature(HASH_BATCH)
                     if (batch.isEmpty()) break
                     val failedIds = ArrayList<Long>()
@@ -133,8 +158,12 @@ class IndexCoordinator(
                     _state.value = _state.value.copy(signatureDone = done)
                 }
 
+                // 指纹合并回主表：查重与识图都读 media_item，不合并就查不到 sha / dHash。
+                // 放在这里也顺便把图库的刷新次数压到"整轮一次"。
+                runCatching { repository.flushPendingSignatures() }
                 _state.value = _state.value.copy(
                     phase = IndexPhase.DEDUPING,
+                    paused = false,
                     message = "正在查找精确重复…",
                 )
                 val exact = duplicateScanner.scanExact()
@@ -150,6 +179,7 @@ class IndexCoordinator(
                 runCatching { thumbnailCache.trim() }
                 _state.value = _state.value.copy(
                     phase = IndexPhase.DONE,
+                    paused = false,
                     exactGroups = exact.groups,
                     nearGroups = near.groups,
                     reclaimableBytes = exact.reclaimableBytes + near.reclaimableBytes,
@@ -174,14 +204,50 @@ class IndexCoordinator(
         }
     }
 
+    /**
+     * 暂停指纹计算（v0.7）。
+     *
+     * 只是让计算循环停在原地；已算好的指纹立刻合并回主表，"暂停再继续"不会白算。
+     * 非运行状态调用无效果。
+     */
+    fun pause() {
+        if (!_state.value.isRunning || paused) return
+        paused = true
+        _state.value = _state.value.copy(
+            paused = true,
+            message = "指纹计算已暂停（已算的结果已保存）",
+        )
+        workerScope.launch { runCatching { repository.flushPendingSignatures() } }
+    }
+
+    /** 继续被暂停的计算。 */
+    fun resume() {
+        if (!paused) return
+        paused = false
+        _state.value = _state.value.copy(
+            paused = false,
+            message = when (_state.value.phase) {
+                IndexPhase.SYNCING -> "正在读取系统相册索引…"
+                IndexPhase.DEDUPING -> "正在查找重复…"
+                else -> "正在计算指纹…"
+            },
+        )
+    }
+
     fun cancel() {
+        paused = false
         job?.cancel()
         job = null
-        _state.value = _state.value.copy(phase = IndexPhase.IDLE, message = "已取消")
+        // 取消也要把已算好的指纹合并回主表：否则下次重扫会把它们再解码一遍（白算）。
+        workerScope.launch { runCatching { repository.flushPendingSignatures() } }
+        _state.value = _state.value.copy(phase = IndexPhase.IDLE, paused = false, message = "已取消（已算的结果已保存）")
     }
 
     companion object {
         private const val HASH_BATCH = 400
         private const val HASH_PARALLELISM = 4
+
+        /** 暂停期间轮询间隔：够省电，又不会让"继续"明显迟钝。 */
+        private const val PAUSE_POLL_MS = 150L
     }
 }

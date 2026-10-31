@@ -61,6 +61,7 @@ import io.github.kurumi33.eropic.ui.EropicViewModel
 import io.github.kurumi33.eropic.ui.common.EropicTopBar
 import io.github.kurumi33.eropic.ui.common.formatBytes
 import io.github.kurumi33.eropic.ui.common.formatCount
+import io.github.kurumi33.eropic.ui.update.UpdateSection
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,7 +97,7 @@ fun SettingsScreen(viewModel: EropicViewModel) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         // v0.5：统一顶栏；副标题带上版本号，用户反馈问题时能直接说明用的哪一版。
-        EropicTopBar(title = "设置", subtitle = "v0.6")
+        EropicTopBar(title = "设置", subtitle = "v0.7")
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -107,6 +108,9 @@ fun SettingsScreen(viewModel: EropicViewModel) {
             // v0.4：每个功能组一个外框（SettingsSection），组里的行直接排在框内，不再叠一层卡片。
             // 顺序：外观 → 图库与查看 → 清理与回收站 → 资源与缓存 → 后台与电量 → 存储权限 → 更多页面 → 关于。
             // v0.6：删掉「联网识图」（Key 已内置进代码、识图入口在底部/清理页），也删掉与关于页重复的入口。
+            // v0.7：应用更新放在最前面——进设置时最先想确认的往往是「我是不是最新版」。
+            UpdateSection(viewModel = viewModel)
+
             SettingsSection(
                 title = "外观",
                 subtitle = "主题与取色。",

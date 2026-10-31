@@ -11,6 +11,7 @@ import androidx.paging.PagingData
 import androidx.room.withTransaction
 import io.github.kurumi33.eropic.core.database.EropicDatabase
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
+import io.github.kurumi33.eropic.core.database.entity.PendingSignatureEntity
 import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
 import io.github.kurumi33.eropic.core.index.ScanScope
 import io.github.kurumi33.eropic.core.model.FolderRow
@@ -246,9 +247,17 @@ class MediaRepository(
     suspend fun markSignatureUnsupported(ids: List<Long>) {
         if (ids.isEmpty()) return
         mediaDao.markSignatureUnsupported(ids)
+        // 待落盘表里可能还有它们的半成品，一并清掉，避免稍后合并时又把 0 分写回去。
+        database.pendingSignatureDao().deleteForMedia(ids)
     }
 
-    /** 指纹与倒排桶一起落库；桶只用于未来增量索引，M0 的内存分组不读它。 */
+    /**
+     * 指纹先写"待落盘表"，不直接写 media_item。
+     *
+     * 原因见 [PendingSignatureEntity]：直接写 media_item 会让图库的 Room PagingSource
+     * 每算一张图就整体刷新一次（用户看到的就是"算指纹时图库一直闪、只剩两个月"）。
+     * 真正的落库在 [flushPendingSignatures] 里一次性完成。
+     */
     suspend fun saveSignature(
         id: Long,
         dhash: Long,
@@ -256,11 +265,40 @@ class MediaRepository(
         blurScore: Double,
         bands: List<HashBandEntity>,
     ) {
-        mediaDao.updateSignature(id, dhash, phash, blurScore)
+        database.pendingSignatureDao().insert(
+            PendingSignatureEntity(
+                mediaId = id,
+                dhash = dhash,
+                phash = phash,
+                blurScore = blurScore,
+                signatureVersion = 1,
+            ),
+        )
         val hashBandDao = database.hashBandDao()
         hashBandDao.deleteForMedia(id)
         hashBandDao.insertAll(bands)
     }
+
+    /**
+     * 把待落盘指纹合并回 media_item（暂停 / 取消 / 一轮算完 / 启动续算时调用）。
+     *
+     * 一次事务、两条 SQL：把 N 次表失效压成 1 次，图库最多刷新一次。
+     * 返回合并的条数。
+     */
+    suspend fun flushPendingSignatures(): Int {
+        val pendingDao = database.pendingSignatureDao()
+        return database.withTransaction {
+            val count = pendingDao.count()
+            if (count > 0) {
+                pendingDao.flushIntoMedia()
+                pendingDao.clear()
+            }
+            count
+        }
+    }
+
+    /** 还没合并回主表的指纹条数（用于进度与"上次被打断"判断）。 */
+    suspend fun countPendingSignatures(): Int = database.pendingSignatureDao().count()
 
     suspend fun exactCandidates() = mediaDao.exactCandidates()
 

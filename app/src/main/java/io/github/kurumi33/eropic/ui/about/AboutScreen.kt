@@ -58,12 +58,9 @@ import io.github.kurumi33.eropic.ui.common.EropicTopBar
 @Composable
 fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
-    // 版本号沿用原来的取法：向系统读自己包的信息，不再额外生成 BuildConfig 字段。
-    val versionName = remember(context) {
-        runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "未知"
-    }
+    // 版本号统一从 BuildConfig 读（由 app/build.gradle.kts 的 appVersionName 自动生成），
+    // 不再单独向 PackageManager 取，保证和安装包信息一致。
+    val versionName = BuildConfig.VERSION_NAME
     val appIcon = remember(context) { loadAppIcon(context) }
 
     Scaffold(
@@ -86,8 +83,13 @@ fun AboutScreen(viewModel: EropicViewModel, onBack: () -> Unit) {
 
             AboutSection(title = "隐私协议") {
                 PrivacyLine("所有照片与索引只存在这台手机上；索引删掉也能重建，不会动你的原图。")
+                PrivacyLine("更新包会下载到 cacheDir/updates，安装完成后可以清理，不会长期占空间。")
                 PrivacyLine("不上传、无账号、不采集统计，也没有任何第三方 SDK 在打点。")
                 PrivacyLine("只有你主动点「联网识图」时才会联网，并且只把你选中的那一张图发给你选的服务商。")
+                PrivacyLine(
+                    "联网识图需要 INTERNET 权限，会把源图上传到你选择的服务商；" +
+                        "而「检查更新」只访问 GitHub Releases 接口获取版本信息，不会上传任何本地图片或索引。",
+                )
                 PrivacyLine("「所有文件访问」只用于移动、重命名、复制和回收站，不用于上传或分析。")
                 PrivacyLine("删除只是移入回收站，默认保留 30 天、随时可恢复。")
                 PrivacyLine("卸载应用不会删除你的照片；只有回收站里的文件需要你先恢复或清空。")
@@ -281,11 +283,23 @@ private fun ChangelogRow(entry: ChangelogEntry) {
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.width(34.dp),
         )
-        Text(
-            text = entry.summary,
-            style = MaterialTheme.typography.bodySmall,
+        Column(
             modifier = Modifier.weight(1f),
-        )
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = entry.summary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            // 只有写了发布日期的版本才显示，老条目留空就自然隐藏。
+            if (entry.date.isNotBlank()) {
+                Text(
+                    text = entry.date,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 

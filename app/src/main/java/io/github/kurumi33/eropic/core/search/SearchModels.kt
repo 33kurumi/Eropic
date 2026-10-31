@@ -89,6 +89,22 @@ enum class ReverseImageProvider(val label: String, val homeUrl: String) {
 
     /** IQDB：二次元图库检索（2D 图），匿名可用；国内通常需要代理。 */
     IQDB("IQDB", "https://iqdb.org/"),
+
+    /**
+     * onegai.moe：二次元图库检索（FlutterPicOrigin 里列出的引擎）。
+     *
+     * 它**只接受公网图片 URL**（GET /search?url=...），没有匿名 multipart 上传入口，
+     * 所以走「先上传到匿名图床拿 URL、再拼搜索页」的通道，见 [ImageHost]。
+     */
+    ONEGAI("onegai.moe", "https://onegai.moe/"),
+
+    /**
+     * Lenso.ai：AI 图像检索，对 cosplay / 角色图 / 地标都有效。
+     *
+     * 原本有 POST /api/upload + /api/search 的 JSON 接口，2026 年被 Cloudflare turnstile 挡掉，
+     * 现在只剩 URL 入口 /en/search-by-url?url=...，同样依赖匿名图床。
+     */
+    LENSO("Lenso.ai", "https://lenso.ai/"),
 }
 
 /**
@@ -109,6 +125,51 @@ data class OnlineSearchResult(
     val resultUrl: String? = null,
     /** 失败原因（中文）；成功时为 null。 */
     val message: String? = null,
+    /**
+     * 服务商在结果页里给出的命中条目（v0.7 起）。
+     *
+     * 动机：用户反馈 SauceNAO 只弹一句「找到 8 个结果」却跳不到结果页——因为它的命中经常没有
+     * ext_url，原来的实现就把整次搜索判定成失败。现在把命中列表带回 App 内展示，
+     * [resultUrl] 只是「顺便能打开的原站链接」，不再是成功的必要条件。
+     */
+    val items: List<OnlineHit> = emptyList(),
+)
+
+/**
+ * 联网识图的一条命中（与 [io.github.kurumi33.eropic.core.search.OnlineParsers.ParsedHit] 字段一致）。
+ *
+ * 独立成一个类型而不是直接复用解析器的 ParsedHit：ParsedHit 属于「网页解析层」，
+ * 以后换解析库或字段可以整体替换，而 UI 依赖的模型应保持稳定。
+ */
+data class OnlineHit(
+    val title: String? = null,
+    /** 0..100 的相似度百分比；服务商不给（ascii2d/IQDB 只有「完全一致/相似」分档）时为 null。 */
+    val similarity: Double? = null,
+    /** 命中的原站链接（pixiv 作品页等）；没有时为 null。 */
+    val extUrl: String? = null,
+    /** 结果页（如 iqdb 的 thumb 页、ascii2d 的详情页）；没有时为 null。 */
+    val pageUrl: String? = null,
+    /** 缩略图地址；App 不加载外链图片，仅保留给「复制链接」用。 */
+    val thumbnailUrl: String? = null,
+)
+
+/**
+ * 「找同一角色的本地图片」的结果（v0.7 新增）。
+ *
+ * 两步走：先联网识图（SauceNAO / ascii2d）拿到角色/作品提示，再在本地按视觉相似度排序，
+ * 所以 [roleHint] 可能为空（离线 / 服务商没给标题），此时 [localMatches] 退化成纯视觉相似结果。
+ */
+data class CharacterMatchResult(
+    /** 作为查询源的图片。 */
+    val source: SimilarImageHit?,
+    /** 本地候选（已按综合分降序）。 */
+    val localMatches: List<SimilarImageHit> = emptyList(),
+    /** 从联网识图拿到的角色/作品提示，例如 "hatsune miku"；拿不到为 null。 */
+    val roleHint: String? = null,
+    /** 给用户看的一句话说明（例如「联网识图没有给出角色名，以下按颜色与结构相似度排序」）。 */
+    val message: String? = null,
+    /** 是否真的联网问过；false 表示只是本地排序。 */
+    val onlineUsed: Boolean = false,
 )
 
 /**

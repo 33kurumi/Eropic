@@ -1,6 +1,8 @@
 package io.github.kurumi33.eropic.ui
 
+import android.content.Intent
 import android.net.Uri
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -11,6 +13,7 @@ import androidx.paging.cachedIn
 import androidx.paging.insertSeparators
 import androidx.paging.map
 import io.github.kurumi33.eropic.AppContainer
+import io.github.kurumi33.eropic.BuildConfig
 import io.github.kurumi33.eropic.core.analysis.detectors.BurstResult
 import io.github.kurumi33.eropic.core.analysis.detectors.LargeFileResult
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
@@ -32,6 +35,7 @@ import io.github.kurumi33.eropic.core.model.FolderRow
 import io.github.kurumi33.eropic.core.model.StatRow
 import io.github.kurumi33.eropic.core.permissions.StorageAccess
 import io.github.kurumi33.eropic.core.query.MediaFilter
+import io.github.kurumi33.eropic.core.search.CharacterMatchResult
 import io.github.kurumi33.eropic.core.search.ImageSearchRepository
 import io.github.kurumi33.eropic.core.search.OnlineImageSearch
 import io.github.kurumi33.eropic.core.search.OnlineSearchResult
@@ -44,6 +48,9 @@ import io.github.kurumi33.eropic.core.settings.RetentionOption
 import io.github.kurumi33.eropic.core.settings.SimilarityLevel
 import io.github.kurumi33.eropic.core.settings.ThemeMode
 import io.github.kurumi33.eropic.core.trash.DeleteResult
+import io.github.kurumi33.eropic.core.update.UpdateChecker
+import io.github.kurumi33.eropic.core.update.UpdateUiState
+import io.github.kurumi33.eropic.core.update.VersionCompare
 import io.github.kurumi33.eropic.core.trash.RestoreResult
 import io.github.kurumi33.eropic.core.trash.TrashResult
 import io.github.kurumi33.eropic.ui.gallery.GalleryDates
@@ -59,6 +66,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -275,6 +283,18 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
     )
 
     fun cancelIndex() = container.indexCoordinator.cancel()
+
+    /**
+     * v0.7：暂停指纹计算。
+     *
+     * 暂停当前批次跑完后就把已算好的结果落库并休眠；不会「白算」——
+     * 已经解码算出的指纹要么已写库，要么在 [io.github.kurumi33.eropic.core.index.IndexCoordinator]
+     * 的待写缓冲里，恢复时先落盘再继续。
+     */
+    fun pauseIndex() = container.indexCoordinator.pause()
+
+    /** v0.7：恢复指纹计算。 */
+    fun resumeIndex() = container.indexCoordinator.resume()
 
     fun rebuildIndex() {
         viewModelScope.launch {
@@ -599,11 +619,137 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    // ---- v0.7：应用内更新（GitHub Release 检查 + 下载 + 调系统安装器） ----
+
+    private val updateChecker = UpdateChecker(container.appContext)
+
+    private val _updateState = MutableStateFlow(UpdateUiState())
+
+    /** 更新卡片状态（含正在下载的进度）。 */
+    val updateState: StateFlow<UpdateUiState> = _updateState
+
+    /**
+     * 当前安装包的版本名（例如 "0.7.0-debug"）。
+     *
+     * 直接问 PackageManager 而不是读 BuildConfig.VERSION_NAME：debug 变体会带 "-debug" 后缀，
+     * 而 VersionCompare 会剥掉后缀再比较数字段，两者都能用，但 PackageManager 才是"真正装上去的那个"。
+     */
+    val currentVersionName: String = runCatching {
+        val info = container.appContext.packageManager
+            .getPackageInfo(container.appContext.packageName, 0)
+        info.versionName
+    }.getOrNull() ?: BuildConfig.VERSION_NAME
+
+    fun checkForUpdates() {
+        if (_updateState.value.checking) return
+        viewModelScope.launch {
+            _updateState.update { it.copy(checking = true, checkingError = null, message = null) }
+            val result = runCatching { updateChecker.check(currentVersionName) }
+            val info = result.getOrNull()
+            _updateState.update { state ->
+                result.exceptionOrNull()?.let { error ->
+                    state.copy(checking = false, checkingError = error.message ?: "检查更新失败")
+                } ?: if (info == null) {
+                    state.copy(
+                        checking = false,
+                        info = null,
+                        updateAvailable = false,
+                        message = "已是最新版本（" + currentVersionName + "）",
+                    )
+                } else {
+                    state.copy(
+                        checking = false,
+                        info = info,
+                        // 用版本名比较，不用 versionCode：本项目 versionCode 是构建时间戳，
+                        // 本地刚构建的包永远比线上 release 的 versionCode 大，比 versionCode 会永远"已是最新"。
+                        updateAvailable = VersionCompare.isNewer(info.versionName, currentVersionName),
+                        message = "发现新版本 " + info.versionName,
+                    )
+                }
+            }
+        }
+    }
+
+    fun downloadUpdate() {
+        val info = _updateState.value.info ?: return
+        if (_updateState.value.downloading) return
+        viewModelScope.launch {
+            _updateState.update { it.copy(downloading = true, progress = 0f, message = "开始下载…") }
+            val result = runCatching {
+                updateChecker.download(info) { fraction ->
+                    // download() 在 IO 线程回调；StateFlow 本身线程安全，直接写即可
+                    _updateState.update { it.copy(progress = fraction) }
+                }
+            }
+            _updateState.update { state ->
+                result.fold(
+                    onSuccess = { path ->
+                        state.copy(
+                            downloading = false,
+                            progress = 1f,
+                            downloadedPath = path,
+                            message = "下载完成，点「安装」继续",
+                        )
+                    },
+                    onFailure = { error ->
+                        state.copy(
+                            downloading = false,
+                            progress = 0f,
+                            message = "下载失败：" + (error.message ?: "未知错误"),
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * 调系统安装器安装已下载的 APK。
+     *
+     * 必须走 FileProvider：Android 7+ 直接传 file:// 会抛 FileUriExposedException；
+     * 临时授权 FLAG_GRANT_READ_URI_PERMISSION，安装器才能读到缓存目录里的文件。
+     * 侧载场景下系统还会要求用户为「Eropic」打开「安装未知应用」权限，这一步只能在系统设置里做。
+     */
+    fun installUpdate() {
+        val path = _updateState.value.downloadedPath ?: return
+        val file = File(path)
+        if (!file.exists()) {
+            _updateState.update { it.copy(message = "安装包不存在，请重新下载", downloadedPath = null) }
+            return
+        }
+        val context = container.appContext
+        runCatching {
+            val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        }.onFailure { error ->
+            _updateState.update {
+                it.copy(message = "无法启动安装器：" + (error.message ?: "未知错误"))
+            }
+        }
+    }
+
+    fun clearUpdateMessage() {
+        _updateState.update { it.copy(message = null, checkingError = null) }
+    }
+
     // ---- v0.2：识图（本地相似图检索 + 联网以图搜图） ----
 
-    private val imageSearch = ImageSearchRepository(container.appContext, container.database)
     // v0.6：SauceNAO 的 key 内置在 OnlineImageSearch 里，不再从设置读，构造参数只剩 ContentResolver
     private val onlineSearchClient = OnlineImageSearch(container.appContext.contentResolver)
+
+    // v0.7：本地识图接上缩略图缓存（颜色精排时读 320px 缩略图，比解码原图快得多），
+    // 并把联网识图客户端传进去，「找同角色」才能先问 SauceNAO / ascii2d 这是谁。
+    private val imageSearch = ImageSearchRepository(
+        context = container.appContext,
+        database = container.database,
+        thumbnailCache = container.thumbnailCache,
+        onlineImageSearch = onlineSearchClient,
+    )
 
     private val _similarityHits = MutableStateFlow<List<SimilarImageHit>>(emptyList())
 
@@ -652,6 +798,70 @@ class EropicViewModel(private val container: AppContainer) : ViewModel() {
             }.getOrElse { emptyList() }
             _similarityHits.value = hits
             _similaritySearching.value = false
+        }
+    }
+
+    // ---- v0.7：找同角色（联网问「这是谁」+ 本地颜色/结构排序） ----
+
+    private val _characterResult = MutableStateFlow<CharacterMatchResult?>(null)
+
+    /** 「找同角色」结果；null 表示还没点过。 */
+    val characterResult: StateFlow<CharacterMatchResult?> = _characterResult
+
+    private val _characterSearching = MutableStateFlow(false)
+    val characterSearching: StateFlow<Boolean> = _characterSearching
+
+    /** 以图库里的图找同角色。 */
+    fun findCharacterByMediaId(mediaId: Long) {
+        similaritySourceId = mediaId
+        similaritySourceUri = null
+        runCharacterMatch()
+    }
+
+    /** 以系统选图找同角色。 */
+    fun findCharacterByUri(uri: Uri) {
+        similaritySourceUri = uri
+        similaritySourceId = null
+        runCharacterMatch()
+    }
+
+    /**
+     * 与 [findCharacterByMediaId] 相同，但把结果直接返回给调用方（识图页要自己管加载态）。
+     *
+     * 为什么同时存在两套：识图页把结果存在页面级 session 里（进程内可恢复），
+     * 不想再额外订阅一份 StateFlow；而其他地方用 [findCharacterByMediaId] 读 [characterResult] 更方便。
+     */
+    suspend fun findCharacterMatchesByMediaId(mediaId: Long): CharacterMatchResult? {
+        similaritySourceId = mediaId
+        similaritySourceUri = null
+        return imageSearch.findCharacterByMediaId(mediaId, SimilarityQuery(keyword = similarityKeyword))
+    }
+
+    /** 与 [findCharacterByUri] 相同，但把结果直接返回给调用方。 */
+    suspend fun findCharacterMatchesByUri(uri: Uri): CharacterMatchResult? {
+        similaritySourceUri = uri
+        similaritySourceId = null
+        return imageSearch.findCharacterByUri(uri, SimilarityQuery(keyword = similarityKeyword))
+    }
+
+    fun clearCharacterResult() {
+        _characterResult.value = null
+    }
+
+    private fun runCharacterMatch() {
+        viewModelScope.launch {
+            _characterSearching.value = true
+            val id = similaritySourceId
+            val uri = similaritySourceUri
+            val query = SimilarityQuery(keyword = similarityKeyword)
+            _characterResult.value = runCatching {
+                when {
+                    id != null -> imageSearch.findCharacterByMediaId(id, query)
+                    uri != null -> imageSearch.findCharacterByUri(uri, query)
+                    else -> null
+                }
+            }.getOrNull()
+            _characterSearching.value = false
         }
     }
 

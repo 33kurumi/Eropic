@@ -96,6 +96,9 @@ fun GalleryScreen(
         mutableStateOf<Set<String>>(emptySet())
     }
     var groupMenuOpen by remember { mutableStateOf(false) }
+    // 当前可见的分组键：由 GalleryDisplayGrid 每算出一次行就回报一次（含排序段编号的键），
+    // 「全部收起」直接把它整体当成折叠集合，不用自己再算一遍日期分组。
+    var visibleGroupKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val selectionActive = selectedIds.isNotEmpty()
@@ -262,6 +265,27 @@ fun GalleryScreen(
                                     },
                                 )
                             }
+                            HorizontalDivider()
+                            // 一键展开/收起所有分组：不分组时没有标题行，两项都置灰。
+                            // 收起用 visibleGroupKeys（网格回报的真实键），而不是按日期自己拼，
+                            // 否则非时间排序下带"#段号"的键对不上，收起会没反应。
+                            DropdownMenuItem(
+                                text = { Text("全部展开") },
+                                enabled = settings.dateGroupMode != DateGroupMode.NONE,
+                                onClick = {
+                                    collapsedGroupKeys = emptySet()
+                                    groupMenuOpen = false
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("全部收起") },
+                                enabled = settings.dateGroupMode != DateGroupMode.NONE &&
+                                    visibleGroupKeys.isNotEmpty(),
+                                onClick = {
+                                    collapsedGroupKeys = visibleGroupKeys
+                                    groupMenuOpen = false
+                                },
+                            )
                         }
                     }
                 },
@@ -272,7 +296,13 @@ fun GalleryScreen(
             PartialAccessBanner(onRequestFullAccess = onRequestFullAccess)
         }
 
-        IndexBanner(indexState = indexState, onRetry = viewModel::startIndex)
+        IndexBanner(
+            indexState = indexState,
+            onRetry = viewModel::startIndex,
+            onPause = viewModel::pauseIndex,
+            onResume = viewModel::resumeIndex,
+            onCancel = viewModel::cancelIndex,
+        )
 
         when {
             indexState.phase == IndexPhase.SYNCING && pagingItems.itemCount == 0 -> {
@@ -314,6 +344,7 @@ fun GalleryScreen(
                     selectionActive = selectionActive,
                     thumbnailProvider = { item -> viewModel.thumbnailFile(item) },
                     onColumnsChange = { columnOverride = it },
+                    onVisibleGroupKeys = { visibleGroupKeys = it },
                     onClick = { item ->
                         if (selectionActive) {
                             selectedIds = if (item.id in selectedIds) {
@@ -398,9 +429,14 @@ private fun PartialAccessBanner(onRequestFullAccess: () -> Unit) {
 private fun IndexBanner(
     indexState: io.github.kurumi33.eropic.core.index.IndexState,
     onRetry: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit,
 ) {
     when (indexState.phase) {
-        IndexPhase.HASHING, IndexPhase.DEDUPING -> {
+        // 指纹计算可以暂停/继续：暂停只是让计算循环停在原地，已算好的指纹已经落库，
+        // 所以文案明说"已保存"，避免用户以为暂停会白算一遍。
+        IndexPhase.HASHING -> {
             val total = indexState.signatureTotal.coerceAtLeast(1)
             val progress = indexState.signatureDone.toFloat() / total
             Column(
@@ -408,16 +444,61 @@ private fun IndexBanner(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
-                Text(
-                    text = "正在计算指纹 " + indexState.signatureDone + " / " + indexState.signatureTotal,
-                    style = MaterialTheme.typography.labelSmall,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (indexState.paused) {
+                            "指纹计算已暂停（已算的结果已保存）"
+                        } else {
+                            "正在计算指纹 " + indexState.signatureDone + " / " + indexState.signatureTotal
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    // 暂停后进度条停在原地，按钮变成"继续"
+                    TextButton(onClick = { if (indexState.paused) onResume() else onPause() }) {
+                        Text(if (indexState.paused) "继续" else "暂停")
+                    }
+                    TextButton(onClick = onCancel) { Text("取消") }
+                }
                 LinearProgressIndicator(
                     progress = { progress.coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 4.dp),
                 )
+            }
+        }
+
+        // 扫描与查重都是短任务，暂停意义不大，只给取消。
+        IndexPhase.SYNCING -> {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "正在读取系统相册索引…",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onCancel) { Text("取消") }
+            }
+        }
+
+        IndexPhase.DEDUPING -> {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "正在查找重复图片…",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onCancel) { Text("取消") }
             }
         }
 

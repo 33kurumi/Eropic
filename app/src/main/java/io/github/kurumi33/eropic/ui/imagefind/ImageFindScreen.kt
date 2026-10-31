@@ -15,6 +15,8 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,17 +36,21 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.PersonSearch
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.SearchOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -81,6 +87,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.media.MediaUris
+import io.github.kurumi33.eropic.core.search.CharacterMatchResult
 import io.github.kurumi33.eropic.core.search.OnlineSearchResult
 import io.github.kurumi33.eropic.core.search.ReverseImageProvider
 import io.github.kurumi33.eropic.core.search.SimilarImageHit
@@ -108,20 +115,13 @@ private const val MIN_FIND_COLUMNS = 2
 private const val MAX_FIND_COLUMNS = 8
 
 /**
- * 联网识图固定这 5 家（顺序即按钮顺序）：Google Lens / 百度识图 / SauceNAO / ascii2d / IQDB。
+ * 联网识图的服务商清单直接取枚举自身的顺序（v0.7 起 7 家）：
+ * GOOGLE_LENS、BAIDU、SAUCENAO、ASCII2D、IQDB、ONEGAI、LENSO。
  *
- * v0.5 起上传协议照抄 kitUIN/PicImageSearch，这 5 家都满足「匿名 multipart 上传本地图片」；
- * v0.6 去掉了 Yandex（结果页依赖服务端 302，稳定性差，且国内同样要代理）。
- * 百度识图是国内唯一能直连的一家，放在第二位当兜底，IQDB 是二次元图库检索放最后。
- * 这里显式列出来而不是用 ReverseImageProvider.entries，方便以后枚举里再增删而不影响界面顺序。
+ * 不再在 UI 里写死列表：枚举顺序本身就是「界面顺序」的唯一来源（见 core/search/SearchModels.kt），
+ * 以后增删服务商只改枚举，界面自动跟上，也不会出现两边顺序对不上的情况。
+ * v0.6 去过 Yandex（结果页依赖服务端 302、稳定性最差），v0.7 又加了 onegai.moe 与 lenso.ai。
  */
-private val ONLINE_PROVIDERS: List<ReverseImageProvider> = listOf(
-    ReverseImageProvider.GOOGLE_LENS,
-    ReverseImageProvider.BAIDU,
-    ReverseImageProvider.SAUCENAO,
-    ReverseImageProvider.ASCII2D,
-    ReverseImageProvider.IQDB,
-)
 
 /**
  * 本地识图的源图：要么是「从设备选图」拿到的 content Uri，要么是「从图库选」里的一张已索引图片。
@@ -152,6 +152,12 @@ private object ImageFindSession {
     var source: FindSource? = null
     var keywordInput: String = ""
     var appliedKeyword: String = ""
+
+    /** 最近一次联网识图的结果：点「打开」可能跳到浏览器，回来时要还看得到列表。 */
+    var onlineResult: OnlineSearchResult? = null
+
+    /** 最近一次「找同角色」的本地候选：点进查看器再返回时同样要保住。 */
+    var characterResult: CharacterMatchResult? = null
 }
 
 /**
@@ -160,7 +166,9 @@ private object ImageFindSession {
  * 顶部用两个 Tab 把两种能力彻底分开，两块内容各自独立滚动，不混排：
  * 1. 本地识图：选一张源图 → ViewModel 计算/读取指纹并与库里的图片比对，结果通过
  *    [EropicViewModel.similarityHits] 推给页面；关键词输入防抖 400ms 后交给 ViewModel 重跑。
- * 2. 联网识图：把当前源图上传到所选服务商，成功后用浏览器打开结果页，失败就地提示。
+ *    另外有一个「找同角色」按钮：点它才让 ViewModel 调识别服务（可能联网）去找同角色候选。
+ * 2. 联网识图：把当前源图上传到 7 家服务商之一，结果（结果页 / 条目列表 / 失败原因）
+ *    直接显示在页面内的「联网结果」区块，需要时再点「在浏览器打开」。
  *
  * 两块共用同一张源图（[ImageFindSession] 保存源图与关键词，因为打开查看器会把整页移出组合）。
  * 本地比对完全在本机完成，不会上传任何图片；只有「联网识图」里点服务商才会触发上传。
@@ -188,7 +196,12 @@ fun ImageFindScreen(
     var keywordInput by remember { mutableStateOf(ImageFindSession.keywordInput) }
     var appliedKeyword by remember { mutableStateOf(ImageFindSession.appliedKeyword) }
     var onlineLoading by remember { mutableStateOf<ReverseImageProvider?>(null) }
-    var onlineNotice by remember { mutableStateOf<OnlineNotice?>(null) }
+    // 最近一次联网识图的结果；上传本身抛异常（无网等）时才用 onlineError 兜底。
+    var onlineResult by remember { mutableStateOf(ImageFindSession.onlineResult) }
+    var onlineError by remember { mutableStateOf<String?>(null) }
+    // 「找同角色」：点按钮才触发（要调识别服务、可能联网），不能随选图自动跑。
+    var characterLoading by remember { mutableStateOf(false) }
+    var characterResult by remember { mutableStateOf(ImageFindSession.characterResult) }
     var showCandidates by remember { mutableStateOf(false) }
     // 0 = 本地识图，1 = 联网识图。
     var selectedTab by remember { mutableStateOf(0) }
@@ -231,7 +244,11 @@ fun ImageFindScreen(
     fun resetSource() {
         source = null
         showCandidates = false
-        onlineNotice = null
+        onlineResult = null
+        onlineError = null
+        characterResult = null
+        ImageFindSession.onlineResult = null
+        ImageFindSession.characterResult = null
     }
 
     // 把关键词立刻交给 ViewModel（内部会按上次源图自动重跑检索）。
@@ -253,7 +270,11 @@ fun ImageFindScreen(
     // 选好源图后触发一次本地检索；失败不崩溃，只提示。联网识图也复用这张源图。
     fun startLocalSearch(next: FindSource) {
         source = next
-        onlineNotice = null
+        onlineResult = null
+        onlineError = null
+        characterResult = null
+        ImageFindSession.onlineResult = null
+        ImageFindSession.characterResult = null
         val trimmed = keywordInput.trim()
         val keywordChanged = trimmed != appliedKeyword
         appliedKeyword = trimmed
@@ -265,7 +286,10 @@ fun ImageFindScreen(
         }
     }
 
-    // 联网识图：上传当前源图 → 打开结果页。同一时间只允许一个请求，避免连点重复上传。
+    // 联网识图：上传当前源图 → 把「结果页 / 条目列表 / 失败原因」交给「联网结果」区块。
+    // v0.7 起不再一成功就自动弹浏览器：SauceNAO、ascii2d、IQDB 只返回条目，
+    // 得先在 App 内列表里挑一条，再点「打开」或「在浏览器打开」。
+    // 同一时间只允许一个请求，避免连点重复上传。
     fun launchOnlineSearch(provider: ReverseImageProvider) {
         if (onlineLoading != null) return
         if (source == null) {
@@ -273,7 +297,8 @@ fun ImageFindScreen(
             return
         }
         onlineLoading = provider
-        onlineNotice = null
+        onlineError = null
+        onlineResult = null
         scope.launch {
             val result: OnlineSearchResult? = try {
                 viewModel.onlineImageSearch(provider)
@@ -284,19 +309,47 @@ fun ImageFindScreen(
             }
             onlineLoading = null
             if (result == null) {
-                onlineNotice = OnlineNotice(false, "联网识图失败：请检查网络后重试")
+                onlineError = "联网识图失败：请检查网络后重试"
                 return@launch
             }
-            val resultUrl = result.resultUrl
-            if (result.ok && !resultUrl.isNullOrBlank()) {
-                if (openInBrowser(context, resultUrl)) {
-                    onlineNotice = OnlineNotice(true, "已在浏览器打开 " + provider.label + " 的结果页")
-                } else {
-                    onlineNotice = OnlineNotice(false, "没有可以打开该链接的浏览器")
+            onlineError = null
+            onlineResult = result
+            ImageFindSession.onlineResult = result
+        }
+    }
+
+    // 「找同角色」：user 点按钮才触发。识别服务要上传源图、慢且可能花配额，所以不做自动检索；
+    // 结果放在 characterResult 里，网格复用相似结果的实现，点击沿用 onOpenViewer。
+    fun findCharacterMatches() {
+        val current = source ?: return
+        if (characterLoading) return
+        characterLoading = true
+        characterResult = null
+        scope.launch {
+            val result: CharacterMatchResult? = try {
+                when (current) {
+                    is FindSource.DeviceUri -> viewModel.findCharacterMatchesByUri(current.uri)
+                    is FindSource.LibraryMedia -> viewModel.findCharacterMatchesByMediaId(current.mediaId)
                 }
-            } else {
-                onlineNotice = OnlineNotice(false, result.message ?: "该服务暂时不可用")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
             }
+            characterLoading = false
+            if (result == null) {
+                viewModel.postMessage("找同角色失败：请检查网络后重试")
+                return@launch
+            }
+            characterResult = result
+            ImageFindSession.characterResult = result
+        }
+    }
+
+    // 统一的外部浏览器入口：打不开就提示，不让页面崩。
+    fun openUrl(url: String) {
+        if (!openInBrowser(context, url)) {
+            viewModel.postMessage("没有可以打开该链接的浏览器")
         }
     }
 
@@ -381,6 +434,13 @@ fun ImageFindScreen(
                     0 -> LocalFindTab(
                         modifier = Modifier.weight(1f),
                         hits = hits,
+                        characterLoading = characterLoading,
+                        characterResult = characterResult,
+                        onFindCharacter = { findCharacterMatches() },
+                        onClearCharacter = {
+                            characterResult = null
+                            ImageFindSession.characterResult = null
+                        },
                         searching = searching,
                         columns = columns,
                         onColumnsChange = { columnOverride = it },
@@ -398,9 +458,11 @@ fun ImageFindScreen(
                     else -> OnlineFindTab(
                         modifier = Modifier.weight(1f),
                         onlineLoading = onlineLoading,
-                        notice = onlineNotice,
+                        onlineResult = onlineResult,
+                        errorText = onlineError,
                         onSearch = { provider -> launchOnlineSearch(provider) },
                         onOpenHome = { provider -> openProviderHome(provider) },
+                        onOpenUrl = { url -> openUrl(url) },
                     )
                 }
             }
@@ -408,11 +470,15 @@ fun ImageFindScreen(
     }
 }
 
-/** 「本地识图」Tab：关键词过滤 + 相似结果网格，内容独立滚动。 */
+/** 「本地识图」Tab：关键词过滤 + 找同角色 + 相似结果网格，内容独立滚动。 */
 @Composable
 private fun LocalFindTab(
     modifier: Modifier = Modifier,
     hits: List<SimilarImageHit>,
+    characterLoading: Boolean,
+    characterResult: CharacterMatchResult?,
+    onFindCharacter: () -> Unit,
+    onClearCharacter: () -> Unit,
     searching: Boolean,
     columns: Int,
     onColumnsChange: (Int) -> Unit,
@@ -452,7 +518,48 @@ private fun LocalFindTab(
             modifier = Modifier.padding(horizontal = 16.dp),
         )
 
-        Box(modifier = Modifier.weight(1f)) {
+        // 「找同角色」：本地相似结果之外的另一条线（按画面里的角色找同款）。
+        // 会触发识别服务（可能联网），所以只做成按钮，不跟选图自动跑。
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedButton(onClick = onFindCharacter, enabled = !characterLoading) {
+                if (characterLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("正在识别…")
+                } else {
+                    Icon(
+                        imageVector = Icons.Outlined.PersonSearch,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("找同角色")
+                }
+            }
+            if (characterResult != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(onClick = onClearCharacter) { Text("回到相似结果") }
+            }
+        }
+
+        // 局部 val：delegated 属性（remember）不能智能转换，先接住再做非空判断。
+        val currentCharacter = characterResult
+        if (currentCharacter != null) {
+            CharacterMatchCard(
+                result = currentCharacter,
+                columns = columns,
+                onColumnsChange = onColumnsChange,
+                thumbnailsEnabled = thumbnailsEnabled,
+                thumbnailProvider = thumbnailProvider,
+                onOpen = onOpenViewer,
+                modifier = Modifier.weight(1f),
+            )
+        } else Box(modifier = Modifier.weight(1f)) {
             when {
                 hits.isEmpty() && searching -> FindingState()
                 hits.isEmpty() -> EmptyResultState(onReselect = onReselect)
@@ -650,18 +757,21 @@ private fun SourceSummary(
     }
 }
 
-/** 联网识图最近一次的结果提示：成功用主色，失败用错误色。 */
-private data class OnlineNotice(val ok: Boolean, val text: String)
-
-/** 「联网识图」Tab：5 个服务商按钮 + 最近一次结果提示；整块独立滚动。 */
+/** 「联网识图」Tab：7 家服务商（自动换行）+ 联网结果区块；整块独立滚动。 */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun OnlineFindTab(
     modifier: Modifier = Modifier,
     onlineLoading: ReverseImageProvider?,
-    notice: OnlineNotice?,
+    onlineResult: OnlineSearchResult?,
+    errorText: String?,
     onSearch: (ReverseImageProvider) -> Unit,
     onOpenHome: (ReverseImageProvider) -> Unit,
+    onOpenUrl: (String) -> Unit,
 ) {
+    // 官网下拉菜单的展开状态；只在本 Tab 内使用。
+    var homeMenuOpen by remember { mutableStateOf(false) }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -682,13 +792,19 @@ private fun OnlineFindTab(
             )
         }
         Text(
-            text = "把当前源图上传到服务商，在浏览器里看结果。上传意味着这张图会离开本机。",
+            text = "把当前源图上传到服务商，命中的结果会直接显示在下方；需要时再点「在浏览器打开」。上传意味着这张图会离开本机。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp),
         )
         Text(
-            text = "除百度识图外，这些网站通常需要代理（Clash 等）才能连上；百度识图国内直连。",
+            text = "百度识图国内可直连；其余服务商通常需要代理（Clash 等）才能连上。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Text(
+            text = "onegai.moe 与 lenso.ai 只能按公网图片链接搜索，App 会先把源图上传到临时图床再把链接交给它们；SauceNAO、ascii2d、IQDB 的结果直接在本页列表里展示。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp),
@@ -707,102 +823,167 @@ private fun OnlineFindTab(
             )
         }
 
-        val currentNotice = notice
-        if (currentNotice != null) {
-            Text(
-                text = currentNotice.text,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (currentNotice.ok) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.error
-                },
-                modifier = Modifier.padding(top = 10.dp),
-            )
-        }
-
-        ONLINE_PROVIDERS.forEach { provider ->
-            ProviderRow(
-                provider = provider,
-                enabled = onlineLoading == null,
-                loading = onlineLoading == provider,
-                hint = providerHint(provider),
-                onSearch = { onSearch(provider) },
-                onOpenHome = { onOpenHome(provider) },
-            )
+        // 7 家服务商 chips 自动换行，避免挤在一行里把按钮压扁。
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            ReverseImageProvider.entries.forEach { provider ->
+                FilterChip(
+                    selected = onlineLoading == provider,
+                    onClick = { onSearch(provider) },
+                    enabled = onlineLoading == null,
+                    label = { Text(provider.label) },
+                    leadingIcon = if (onlineLoading == provider) {
+                        {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        }
+                    } else {
+                        null
+                    },
+                )
+            }
         }
 
         Text(
-            text = "识别不出结果时，可以点「官网」手动上传原图再试。除百度识图外，其余服务商通常都需要代理。",
+            text = "识别不出结果时，可以打开服务商官网手动上传原图再试。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 14.dp),
+        )
+        Box {
+            OutlinedButton(
+                onClick = { homeMenuOpen = true },
+                enabled = onlineLoading == null,
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Language,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("打开服务商官网")
+                Icon(
+                    imageVector = Icons.Filled.ArrowDropDown,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            DropdownMenu(expanded = homeMenuOpen, onDismissRequest = { homeMenuOpen = false }) {
+                ReverseImageProvider.entries.forEach { provider ->
+                    DropdownMenuItem(
+                        text = { Text(provider.label) },
+                        onClick = {
+                            homeMenuOpen = false
+                            onOpenHome(provider)
+                        },
+                    )
+                }
+            }
+        }
+
+        // 上传抛异常（无网、服务商 5xx 等）时的红色提示；正常失败走 OnlineSearchResult 里的 message。
+        val currentError = errorText
+        if (currentError != null) {
+            ErrorCard(text = currentError)
+        }
+
+        val currentResult = onlineResult
+        if (currentResult != null) {
+            OnlineResultsSection(result = currentResult, onOpenUrl = onOpenUrl)
+        }
+    }
+}
+
+/** 联网识图异常（无网、上传失败等）的红色提示卡。 */
+@Composable
+private fun ErrorCard(text: String) {
+    OutlinedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(16.dp),
         )
     }
 }
 
 /**
- * 每个服务商的一句话说明：只讲「要不要代理」，端点与表单字段的实现细节留在 core/search/OnlineImageSearch 里。
+ * 「同角色候选」卡片：顶部写清识别依据（roleHint + source），下面网格展示 localMatches。
  *
- * v0.6 起 SauceNAO 的 API Key 已内置在 AppSettings 默认值里，界面上不再有「填 Key」这类提示，
- * 所以这里只剩代理说明，when 也只覆盖剩下的 5 家。
+ * 网格复用本地相似结果的实现（同样支持捏合改列数）；点任意一张就带着整个候选集合打开查看器，
+ * 这样在查看器里可以一直翻到下一个同角色候选，而不是只翻当前屏幕。
  */
-private fun providerHint(provider: ReverseImageProvider): String = when (provider) {
-    ReverseImageProvider.GOOGLE_LENS -> "海外，需要代理"
-    ReverseImageProvider.BAIDU -> "国内可直连"
-    ReverseImageProvider.SAUCENAO -> "海外，需要代理"
-    ReverseImageProvider.ASCII2D -> "海外，需要代理"
-    ReverseImageProvider.IQDB -> "海外，需要代理"
-}
-
-/** 单个服务商：名称 + 状态说明 + 「官网」兜底入口 + 识图按钮。 */
 @Composable
-private fun ProviderRow(
-    provider: ReverseImageProvider,
-    enabled: Boolean,
-    loading: Boolean,
-    hint: String,
-    onSearch: () -> Unit,
-    onOpenHome: () -> Unit,
+private fun CharacterMatchCard(
+    result: CharacterMatchResult,
+    columns: Int,
+    onColumnsChange: (Int) -> Unit,
+    thumbnailsEnabled: Boolean,
+    thumbnailProvider: suspend (Long) -> File?,
+    onOpen: (List<Long>, Int) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    OutlinedCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 10.dp),
-    ) {
-        Row(
+    Column(modifier = modifier.fillMaxSize()) {
+        OutlinedCard(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .padding(horizontal = 12.dp, vertical = 4.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = provider.label, style = MaterialTheme.typography.titleSmall)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+            ) {
                 Text(
-                    text = if (loading) "正在上传…" else hint,
+                    text = result.roleHint?.takeIf { it.isNotBlank() } ?: "按画面特征找到的相近图片",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = "识别依据：" + result.source,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                Text(
+                    text = "共 " + result.localMatches.size + " 张候选 · 点开可在查看器里左右翻看",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
-            TextButton(onClick = onOpenHome, enabled = !loading) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Outlined.OpenInNew,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("官网")
-            }
-            Spacer(modifier = Modifier.width(4.dp))
-            Button(onClick = onSearch, enabled = enabled && !loading) {
-                if (loading) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                } else {
-                    Text("识图")
-                }
-            }
+        }
+
+        if (result.localMatches.isEmpty()) {
+            Text(
+                text = "没有找到足够相近的角色图片，可以换一张源图再试。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+            )
+        } else {
+            SimilarHitsGrid(
+                hits = result.localMatches,
+                columns = columns,
+                onColumnsChange = onColumnsChange,
+                thumbnailsEnabled = thumbnailsEnabled,
+                thumbnailProvider = thumbnailProvider,
+                onOpen = onOpen,
+            )
         }
     }
 }

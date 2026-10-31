@@ -35,3 +35,5 @@ google-services.json
 .gradle-home/
 .android-home/
 /docs/search
+# 本机构建日志
+/.build-*.txt

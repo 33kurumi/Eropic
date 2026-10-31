@@ -47,6 +47,8 @@ import okhttp3.Response
  */
 class OnlineImageSearch(
     private val contentResolver: ContentResolver,
+    /** 匿名临时图床：URL 型服务商（onegai/lenso/IQDB/ascii2d/Lens）先把图传上去换公网链接。 */
+    private val imageHost: ImageHost = ImageHost(),
 ) {
 
     suspend fun search(uri: Uri, provider: ReverseImageProvider): OnlineSearchResult =
@@ -74,29 +76,83 @@ class OnlineImageSearch(
             }
         }
 
-    private fun execute(bytes: ByteArray, mime: String, provider: ReverseImageProvider): OnlineSearchResult =
-        when (provider) {
-            ReverseImageProvider.GOOGLE_LENS -> googleLens(bytes, mime)
-            ReverseImageProvider.BAIDU -> baidu(bytes, mime)
-            ReverseImageProvider.SAUCENAO -> sauceNao(bytes, mime)
-            ReverseImageProvider.ASCII2D -> ascii2d(bytes, mime)
-            ReverseImageProvider.IQDB -> iqdb(bytes, mime)
+    private suspend fun execute(
+        bytes: ByteArray,
+        mime: String,
+        provider: ReverseImageProvider,
+    ): OnlineSearchResult = when (provider) {
+        ReverseImageProvider.GOOGLE_LENS -> googleLens(bytes, mime)
+        ReverseImageProvider.BAIDU -> baidu(bytes, mime)
+        ReverseImageProvider.SAUCENAO -> sauceNao(bytes, mime)
+        // 以下四家没有匿名 multipart 上传入口，只能把图片放到公网再拼 URL（见 ImageHost）
+        ReverseImageProvider.ASCII2D -> urlSearch(provider, bytes, mime) { publicUrl ->
+            // PicImageSearch 的 ascii2d 是 POST /search/file；它同时提供 GET /search/url/<url>（不经表单）
+            ASCII2D_URL_SEARCH_PREFIX + Uri.encode(publicUrl, "/:")
         }
+        ReverseImageProvider.IQDB -> urlSearch(provider, bytes, mime) { publicUrl ->
+            iqdbUrl(publicUrl)
+        }
+        ReverseImageProvider.ONEGAI -> urlSearch(provider, bytes, mime) { publicUrl ->
+            "https://onegai.moe/search?url=" + Uri.encode(publicUrl, "/:")
+        }
+        ReverseImageProvider.LENSO -> urlSearch(provider, bytes, mime) { publicUrl ->
+            // Lenso 的页面入口需要带 utm_source=sbi，否则会落到首页而不是「按图搜索」
+            "https://lenso.ai/en/search-by-url?url=" + Uri.encode(publicUrl, "/:") + "&utm_source=sbi"
+        }
+    }
 
     /**
-     * Google Lens（对照 PicImageSearch/engines/google_lens.py）。
+     * URL 型服务商的统一通道：先匿名上传换公网链接，再把链接拼成搜索页给浏览器打开。
      *
-     * 端点（非官方）：POST https://lens.google.com/v3/upload
-     * 表单字段：encoded_image = 图片文件（multipart/form-data）
-     * 注意：**不能带 hl 参数**，PicImageSearch 注释原话「Google Lens currently returns 403 when upload
-     * requests include hl.」，v0.4 之前我们带了 hl=zh-CN，正是它导致 403。
-     *
-     * 结果 URL：服务端 303 跳到 https://lens.google.com/search?...，跟随重定向后取最终请求 URL；
-     * 但 Lens 新版会把结果重定向到 google.com 的 udm=37（商品）/44（同图）/48（视觉匹配）页面，
-     * 所以再按 PicImageSearch 的做法从响应 HTML 里找 a[href*="udm=37|44|48"] 拼成 www.google.com 链接兜底。
+     * 为什么不能 multipart 直传：这几家的入口是「给我一个 URL」而不是「收一个文件」，
+     * App 的 content:// 地址外网访问不到，所以必须中转一次（FlutterPicOrigin 用自建 Worker 做同样的事）。
      */
-    private fun googleLens(bytes: ByteArray, mime: String): OnlineSearchResult {
+    private suspend fun urlSearch(
+        provider: ReverseImageProvider,
+        bytes: ByteArray,
+        mime: String,
+        buildUrl: (String) -> String,
+    ): OnlineSearchResult {
+        val publicUrl = imageHost.upload(bytes, mime)
+            ?: return failed(
+                provider,
+                provider.label + " 只接受公网图片链接，而临时图床上传失败了；" +
+                    "请检查网络后重试（国内访问 catbox 系列通常需要代理）",
+            )
+        return OnlineSearchResult(
+            provider = provider,
+            ok = true,
+            resultUrl = buildUrl(publicUrl),
+            message = "已把源图上传到临时图床（1 小时后自动删除），结果页在浏览器里打开",
+        )
+    }
+
+    /**
+     * Google Lens（对照 PicImageSearch/engines/google_lens.py + FlutterPicOrigin 的 URL 模式）。
+     *
+     * 两条路，优先第一条：
+     * 1. **URL 模式**（v0.7 起为主）：https://lens.google.com/uploadbyurl?url=<公网图片链接>。
+     *    用户反馈 v0.6 的 POST 上传「实测不对」——原因是 POST 后 Lens 会 303 到
+     *    lens.google.com/search?ep=... 这种**依赖上传会话**的地址，用系统浏览器打开它时没有那份会话，
+     *    于是落在「请上传图片」的空页上。URL 模式的结果页是自包含的，换设备/换浏览器都能打开，
+     *    FlutterPicOrigin 也正是这么做的。
+     * 2. **multipart 模式**（回退）：POST https://lens.google.com/v3/upload，字段 encoded_image。
+     *    注意**不能带 hl 参数**（PicImageSearch 注释原话：带 hl 直接 403），只能带 q。
+     *    拿到响应后：最终 URL 是 /search? 就直接用；否则按 PicImageSearch 的做法从 HTML 里
+     *    找 a[href*="udm=37|44|48"]（37 商品 / 44 同图 / 48 视觉匹配）拼成 www.google.com 链接。
+     */
+    private suspend fun googleLens(bytes: ByteArray, mime: String): OnlineSearchResult {
         val provider = ReverseImageProvider.GOOGLE_LENS
+        val publicUrl = imageHost.upload(bytes, mime)
+        if (publicUrl != null) {
+            return OnlineSearchResult(
+                provider = provider,
+                ok = true,
+                resultUrl = "https://lens.google.com/uploadbyurl?url=" + Uri.encode(publicUrl, "/:"),
+                message = "已把源图上传到临时图床（1 小时后自动删除），结果页在浏览器里打开",
+            )
+        }
+        // 图床不可用（国内直连 catbox 常失败）时退回直传，至少还有机会拿到结果页
         val url = UPLOAD_URL_GOOGLE_LENS.toHttpUrlOrNull()
             ?: return failed(provider, "内部错误：上传地址拼装失败")
         val body = MultipartBody.Builder()
@@ -212,19 +268,33 @@ class OnlineImageSearch(
             val status = ReverseSearchParsers.sauceNaoStatus(text)
                 ?: return failed(provider, "SauceNAO 返回了无法解析的响应（接口可能已变更），请稍后再试")
             if (status != 0) return failed(provider, sauceNaoStatusMessage(status))
-            val hits = ReverseSearchParsers.sauceNaoResults(text)
-            val extUrl = hits.firstNotNullOfOrNull { it.extUrl }
-            if (extUrl != null) {
-                return OnlineSearchResult(provider = provider, ok = true, resultUrl = extUrl)
-            }
-            val returned = ReverseSearchParsers.sauceNaoResultsReturned(text) ?: hits.size
-            return if (returned <= 0) {
-                failed(provider, "SauceNAO 没有找到相似来源，可换一张更清晰的图，或到 saucenao.com 手动检索")
-            } else {
+            // v0.7：不再「只挑一个 ext_url 当结果页」，改成把命中列表带回 App 内展示。
+            // 用户反馈的原话是「显示找到 8 个结果什么意思，不给我跳转到结果地方吗」——根源就是
+            // v0.6 在没有 ext_url 时把整次搜索判成失败，只留下一句话。
+            val parsed = OnlineParsers.sauceNao(text)
+            val items = parsed.results.toOnlineHits()
+            val returned = ReverseSearchParsers.sauceNaoResultsReturned(text) ?: parsed.results.size
+            return if (items.isEmpty()) {
                 failed(
                     provider,
-                    "SauceNAO 找到 " + returned + " 个结果，但都没有可直接打开的来源链接；" +
-                        "请到 saucenao.com 用同一张图手动检索",
+                    if (returned <= 0) {
+                        "SauceNAO 没有找到相似来源，可换一张更清晰的图，或到 saucenao.com 手动检索"
+                    } else {
+                        "SauceNAO 报告有 " + returned + " 个结果，但解析后没有可展示条目（接口可能已变更）"
+                    },
+                )
+            } else {
+                OnlineSearchResult(
+                    provider = provider,
+                    ok = true,
+                    // 有原站链接时顺手给出「在浏览器打开」；没有也不影响 App 内列表展示
+                    resultUrl = items.firstNotNullOfOrNull { it.extUrl },
+                    items = items,
+                    message = if (returned > items.size) {
+                        "共 " + returned + " 个结果，这里显示相似度最高的 " + items.size + " 个"
+                    } else {
+                        null
+                    },
                 )
             }
         }
@@ -269,62 +339,25 @@ class OnlineImageSearch(
     }
 
     /**
-     * ascii2d（二次元以图搜图，对照 PicImageSearch/engines/ascii2d.py）。
+     * IQDB 的查询地址：`https://iqdb.org/?url=<公网图片链接>`。
      *
-     * 端点（非官方）：POST https://ascii2d.net/search/file?type=color
-     * 表单字段：file = 图片文件（multipart/form-data）
-     * 结果 URL：302 跳到 https://ascii2d.net/search/color/<hash>；
-     *          bovw（特征检索）是 /search/bovw/<hash>，只有提交失败时才会停在 /search/file。
+     * v0.6 用 POST https://iqdb.org（字段 file）——用户反馈「IQDB 为什么是直接跳转过去没有把图片传进去」，
+     * 原因是 POST 被服务端重定向到 iqdb.org/?url=... 时 okhttp 自动跟随成了一次**GET 首页**，
+     * 我们又把重定向后的 URL 当结果页打开，于是用户看到的就是 IQDB 首页。改成 URL 模式后，
+     * 图片链接是查询参数的一部分，服务端一定会按它检索。
      */
-    private fun ascii2d(bytes: ByteArray, mime: String): OnlineSearchResult {
-        val provider = ReverseImageProvider.ASCII2D
-        val url = UPLOAD_URL_ASCII2D.toHttpUrlOrNull()
-            ?.newBuilder()
-            ?.addQueryParameter("type", "color")
-            ?.build()
-            ?: return failed(provider, "内部错误：上传地址拼装失败")
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("file", IMAGE_FILE_NAME, bytes.toRequestBody(mime.toMediaType()))
-            .build()
-        post(url, body).use { response ->
-            val finalUrl = response.request.url.toString()
-            return if (finalUrl.contains("/search/color") || finalUrl.contains("/search/bovw") ||
-                finalUrl.contains("uri=")
-            ) {
-                OnlineSearchResult(provider = provider, ok = true, resultUrl = finalUrl)
-            } else {
-                failed(
-                    provider,
-                    "ascii2d 没有跳转到结果页（接口可能已变更，HTTP " + response.code + "）",
-                )
-            }
-        }
-    }
+    private fun iqdbUrl(publicUrl: String): String =
+        "https://iqdb.org/?url=" + Uri.encode(publicUrl, "/:")
 
-    /**
-     * IQDB（二次元图库检索，对照 PicImageSearch/engines/iqdb.py）。
-     *
-     * 端点（非官方）：POST https://iqdb.org（3D 图用 3d.iqdb.org）
-     * 表单字段：file = 图片文件；forcegray=on 表示忽略颜色（这里不传）
-     * 结果 URL：服务端在同一次响应里渲染结果页（POST 后 resp.url 带查询参数），直接打开即可。
-     */
-    private fun iqdb(bytes: ByteArray, mime: String): OnlineSearchResult {
-        val provider = ReverseImageProvider.IQDB
-        val url = UPLOAD_URL_IQDB.toHttpUrlOrNull()
-            ?: return failed(provider, "内部错误：上传地址拼装失败")
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("file", IMAGE_FILE_NAME, bytes.toRequestBody(mime.toMediaType()))
-            .build()
-        post(url, body).use { response ->
-            val finalUrl = response.request.url.toString()
-            return if (finalUrl.contains("iqdb.org")) {
-                OnlineSearchResult(provider = provider, ok = true, resultUrl = finalUrl)
-            } else {
-                failed(provider, "IQDB 没有返回结果页（接口可能已变更，HTTP " + response.code + "）")
-            }
-        }
+    /** 把网页解析层（[OnlineParsers]）的命中转成 UI 模型，见 [OnlineHit] 的注释。 */
+    internal fun List<ParsedHit>.toOnlineHits(): List<OnlineHit> = map { hit ->
+        OnlineHit(
+            title = hit.title,
+            similarity = hit.similarity,
+            extUrl = hit.extUrl,
+            pageUrl = hit.pageUrl,
+            thumbnailUrl = hit.thumbnailUrl,
+        )
     }
 
     private fun post(
@@ -377,8 +410,14 @@ class OnlineImageSearch(
         const val UPLOAD_URL_GOOGLE_LENS = "https://lens.google.com/v3/upload"
         const val UPLOAD_URL_BAIDU = "https://graph.baidu.com/upload"
         const val UPLOAD_URL_SAUCE_NAO = "https://saucenao.com/search.php"
-        const val UPLOAD_URL_ASCII2D = "https://ascii2d.net/search/file"
-        const val UPLOAD_URL_IQDB = "https://iqdb.org"
+        /**
+         * ascii2d 的 URL 检索路径：`https://ascii2d.net/search/url/<公网图片链接>`。
+         *
+         * 它同时有 POST /search/file（表单上传，PicImageSearch 用的就是它）和这条 GET 路径；
+         * 我们选 GET 是因为 multipart 那次的 302 目标 /search/color/<hash> 是**服务端会话**地址，
+         * 用户反馈「ascii2d 显示没有跳转到结果页」正是 v0.6 判断 302 失败导致的。
+         */
+        const val ASCII2D_URL_SEARCH_PREFIX = "https://ascii2d.net/search/url/"
 
         const val DEFAULT_MIME = "image/jpeg"
         const val IMAGE_FILE_NAME = "image.jpg"

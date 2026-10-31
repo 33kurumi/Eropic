@@ -111,17 +111,19 @@ class SearchCoreTest {
     }
 
     @Test
-    fun reverseImageProvider_keepsFiveDistinctHttpsHomes() {
+    fun reverseImageProvider_keepsDistinctHttpsHomes() {
         val providers = ReverseImageProvider.entries
-        assertEquals(5, providers.size)
+        assertEquals(7, providers.size)
         // v0.5 起对齐 kitUIN/PicImageSearch：whos.tv 下线（需要账号+积分且被 Cloudflare 拦），
-        // 补上实现简单的 IQDB。v0.6 再去掉 Yandex（结果页依赖服务端 302，稳定性差且同样要代理）。
+        // 补上实现简单的 IQDB。v0.6 去掉 Yandex（结果页依赖服务端 302，稳定性差且同样要代理）。
+        // v0.7 加 onegai.moe / Lenso.ai：这两家只接受公网图片链接，由 ImageHost 先把源图传到
+        // 1 小时自动删除的临时图床再拼 URL（见 OnlineImageSearch.urlSearch）。
         // 枚举顺序即 UI 上的按钮顺序。
         assertEquals(
-            listOf("GOOGLE_LENS", "BAIDU", "SAUCENAO", "ASCII2D", "IQDB"),
+            listOf("GOOGLE_LENS", "BAIDU", "SAUCENAO", "ASCII2D", "IQDB", "ONEGAI", "LENSO"),
             providers.map { it.name },
         )
-        assertEquals(5, providers.map { it.label }.distinct().size)
+        assertEquals(7, providers.map { it.label }.distinct().size)
         providers.forEach { provider ->
             assertTrue(
                 "provider " + provider.name + " 的 homeUrl 必须是 https 地址",

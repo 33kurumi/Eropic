@@ -11,6 +11,7 @@ import io.github.kurumi33.eropic.core.database.dao.DuplicateDao
 import io.github.kurumi33.eropic.core.database.dao.HashBandDao
 import io.github.kurumi33.eropic.core.database.dao.MediaDao
 import io.github.kurumi33.eropic.core.database.dao.OperationLogDao
+import io.github.kurumi33.eropic.core.database.dao.PendingSignatureDao
 import io.github.kurumi33.eropic.core.database.dao.SavedFilterDao
 import io.github.kurumi33.eropic.core.database.dao.TrashDao
 import io.github.kurumi33.eropic.core.database.entity.DuplicateGroupEntity
@@ -18,6 +19,7 @@ import io.github.kurumi33.eropic.core.database.entity.DuplicateMemberEntity
 import io.github.kurumi33.eropic.core.database.entity.HashBandEntity
 import io.github.kurumi33.eropic.core.database.entity.MediaEntity
 import io.github.kurumi33.eropic.core.database.entity.OperationLogEntity
+import io.github.kurumi33.eropic.core.database.entity.PendingSignatureEntity
 import io.github.kurumi33.eropic.core.database.entity.SavedFilterEntity
 import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
 
@@ -30,8 +32,9 @@ import io.github.kurumi33.eropic.core.database.entity.TrashItemEntity
         TrashItemEntity::class,
         OperationLogEntity::class,
         SavedFilterEntity::class,
+        PendingSignatureEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class EropicDatabase : RoomDatabase() {
@@ -43,6 +46,9 @@ abstract class EropicDatabase : RoomDatabase() {
     abstract fun trashDao(): TrashDao
     abstract fun operationLogDao(): OperationLogDao
     abstract fun savedFilterDao(): SavedFilterDao
+
+    /** v0.7：待落盘的图片指纹（见 [PendingSignatureEntity]）。 */
+    abstract fun pendingSignatureDao(): PendingSignatureDao
 
     companion object {
         /**
@@ -109,10 +115,31 @@ abstract class EropicDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v4 -> v5：v0.7 新增待落盘指纹表（pending_signature）。
+         *
+         * 纯新增空表，不碰 media_item，因此升级不会丢已有索引、也不需要重扫。
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `pending_signature` (" +
+                        "`mediaId` INTEGER NOT NULL, " +
+                        "`dhash` INTEGER, " +
+                        "`phash` INTEGER, " +
+                        "`blurScore` REAL, " +
+                        "`sha256` TEXT, " +
+                        "`signatureVersion` INTEGER NOT NULL, " +
+                        "`updatedAtMs` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`mediaId`))",
+                )
+            }
+        }
+
         fun build(context: Context): EropicDatabase =
             Room.databaseBuilder(context, EropicDatabase::class.java, "eropic.db")
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 // 兜底：未来新增版本忘了写迁移时，宁可清库重建也不要让 App 启动即崩。
                 .fallbackToDestructiveMigration()
                 .build()

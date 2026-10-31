@@ -37,6 +37,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -47,6 +48,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import androidx.paging.ItemSnapshotList
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import coil3.compose.AsyncImage
@@ -82,11 +84,27 @@ fun GalleryDisplayGrid(
     onClick: (MediaEntity) -> Unit,
     onLongClick: (MediaEntity) -> Unit,
     onColumnsChange: (Int) -> Unit,
+    /**
+     * 把当前可见的分组键回报给上层，供「更多 → 显示方式 → 全部收起」一次性折叠所有分组。
+     * 默认空实现：不是所有调用方都关心分组键。
+     */
+    onVisibleGroupKeys: (Set<String>) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val loadedCount = items.itemCount
-    val snapshot = items.itemSnapshotList
-    val rows = remember(snapshot, loadedCount, mode, dateSorted, collapsedKeys) {
+    // 折叠/滚动性能：不要把 itemSnapshotList 直接当 remember 的 key。
+    // 它是 mutableStateOf，Paging 每派发一次数据事件（插入/丢弃/加载状态变化）
+    // 都会换成一个新的 ItemSnapshotList 对象，而 remember 用 equals 比较 key；
+    // ItemSnapshotList 继承自 AbstractList，相等性是逐元素比较——屏幕上几千张图时，
+    // 每次重组都要做几千次 MediaEntity.equals（选择模式切换、设置变更这类
+    // 与数据无关的重组也逃不掉），折叠时紧接着还要全量重建行，
+    // 两者叠加就是用户反馈的卡顿和闪烁。
+    // 改用 SnapshotStamp：只判断"快照对象是不是同一个实例"，O(1)。
+    // 代价是分页状态回调也会换快照 → 多算一次行（O(n)，和原来一次 equals 同量级），
+    // 但这换来的是：数据真变了（收藏/删除/排序/筛选）一定重建，绝不显示旧状态。
+    // 也正因为这样，不能只留 loadedCount 当 key：这些改动常常不改变总张数。
+    val snapshotStamp = SnapshotStamp(items.itemSnapshotList)
+    val rows = remember(snapshotStamp, loadedCount, mode, dateSorted, collapsedKeys) {
         val photos = ArrayList<MediaEntity>(loadedCount)
         for (index in 0 until loadedCount) {
             val entity = items.peek(index) ?: continue
@@ -97,6 +115,20 @@ fun GalleryDisplayGrid(
             mode = mode,
             dateSorted = dateSorted,
             collapsedKeys = collapsedKeys,
+        )
+    }
+
+    // 上报可见分组键：回调用 rememberUpdatedState 包一层，
+    // 避免上层每次重组传进来的新 lambda 触发 Effect 重启。
+    val latestOnVisibleGroupKeys = rememberUpdatedState(onVisibleGroupKeys)
+    // key 用与 rows 相同的输入：不要用 rows 本身当 key —— List 的 equals 又是逐元素比较，
+    // 等于把刚省下来的 O(n) 又加回来。
+    LaunchedEffect(snapshotStamp, loadedCount, mode, dateSorted, collapsedKeys) {
+        latestOnVisibleGroupKeys.value(
+            rows.asSequence()
+                .filterIsInstance<GalleryDisplayRow.Header>()
+                .map { it.key }
+                .toSet(),
         )
     }
 
@@ -398,4 +430,19 @@ private fun Modifier.pinchToChangeColumns(
             } while (event.changes.any { it.pressed })
         }
     }
+}
+
+/**
+ * remember 的缓存键：只认"快照对象是不是同一个实例"，不比较内容。
+ *
+ * 不直接把 [ItemSnapshotList] 当 key：它继承自 AbstractList，equals 是逐元素比较，
+ * 数据上千时每次重组都是 O(n) 次 MediaEntity.equals（见 [GalleryDisplayGrid] 里的说明）。
+ * 也不能只按"已加载张数"做 key：收藏、改名、移入回收站等改动不改变总张数，
+ * 那样网格会一直显示旧实体。
+ */
+private class SnapshotStamp(val snapshot: ItemSnapshotList<MediaEntity>) {
+    override fun equals(other: Any?): Boolean =
+        other is SnapshotStamp && other.snapshot === snapshot
+
+    override fun hashCode(): Int = System.identityHashCode(snapshot)
 }

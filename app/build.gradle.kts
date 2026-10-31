@@ -8,7 +8,21 @@ import java.util.Locale
 
 val buildTimeMs = System.currentTimeMillis()
 val buildStamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date(buildTimeMs))
-val appVersionName = "0.6.0"
+val appVersionName = "0.7.0"
+
+// v0.7：release 签名。
+// 侧载分发需要一个长期稳定的签名（换签名必须卸载重装，用户数据会丢），所以优先用项目根目录的
+// keystore/eropic-release.jks（口令走 gradle.properties 或环境变量，不入库）；
+// 这个文件不存在时（比如 clone 下来第一次构建）回退到 debug 签名，保证 :app:assembleRelease 永远能跑通。
+// 注意：keysore 本身和口令都不要提交到 git。
+val releaseKeystoreFile = rootProject.file("keystore/eropic-release.jks")
+val hasReleaseKeystore = releaseKeystoreFile.isFile
+val releaseStorePassword = (providers.gradleProperty("eropic.storePassword").orNull
+    ?: System.getenv("EROPIC_STORE_PASSWORD") ?: "")
+val releaseKeyAlias = (providers.gradleProperty("eropic.keyAlias").orNull
+    ?: System.getenv("EROPIC_KEY_ALIAS") ?: "eropic")
+val releaseKeyPassword = (providers.gradleProperty("eropic.keyPassword").orNull
+    ?: System.getenv("EROPIC_KEY_PASSWORD") ?: releaseStorePassword)
 
 plugins {
     alias(libs.plugins.android.application)
@@ -40,12 +54,29 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }
         release {
+            // 有正式 keystore 用它；没有则回退 debug 签名（仍是签过名的包，能直接安装）
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

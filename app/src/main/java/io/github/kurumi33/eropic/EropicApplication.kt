@@ -109,12 +109,16 @@ class EropicApplication : Application() {
      * 判据：已经算过指纹（countHashed > 0）且还有没算的（countNeedingSignature > 0）。
      * 全新安装（countHashed == 0）不会在这里擅自开始全量扫描——那是用户主动点的"开始建立索引"。
      * 用户可在设置里关掉"启动时自动续算"。
+     *
+     * v0.7：指纹先写待落盘表，所以要先把上次遗留的合并回主表——否则它们既不算"已算过"、
+     * 又不会出现在"待算"里，续算判断会误以为没有工作。
      */
     private suspend fun maybeResumeInterruptedIndex() {
         val settings = runCatching { container.settingsRepository.settings.first() }.getOrNull() ?: return
         if (!settings.autoResumeIndex) return
         val coordinator = container.indexCoordinator
         if (coordinator.state.value.isRunning) return
+        runCatching { container.mediaRepository.flushPendingSignatures() }
         val hashed = runCatching { container.mediaRepository.countHashed() }.getOrDefault(0)
         if (hashed <= 0) return
         val needing = runCatching { container.mediaRepository.countNeedingSignature() }.getOrDefault(0)

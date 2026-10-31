@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v0.7 应用内更新：只暴露下载目录 cacheDir/updates/，其他私有文件一律不共享 -->
+<paths>
+    <cache-path
+        name="updates"
+        path="updates/" />
+</paths>
